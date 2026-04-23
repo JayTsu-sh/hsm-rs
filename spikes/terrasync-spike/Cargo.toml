@@ -1,0 +1,24 @@
+[package]
+name = "terrasync-spike"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Validate that terrasync-rs storage_v2 can drive the HSM data path"
+
+[[bin]]
+name = "terrasync-spike"
+path = "src/main.rs"
+
+[dependencies]
+storage_v2 = { path = "../../../terrasync-rs/crates/storage_v2" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+anyhow = "1"
+
+# Make this an explicit workspace root so the [patch] section below is honored.
+# storage_v2 transitively depends on the JayTsu-sh forks of nfs-rs / smb.
+[workspace]
+
+[patch.crates-io]
+nfs-rs = { git = "https://github.com/JayTsu-sh/nfs-rs.git" }
+smb = { git = "https://github.com/JayTsu-sh/smb-rs.git" }
