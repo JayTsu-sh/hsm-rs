@@ -64,10 +64,20 @@ impl Default for DaemonConfig {
 }
 
 /// Handle returned by [`Daemon::start`]. Drop to request shutdown; await
-/// to join all spawned tasks.
+/// `shutdown()` to join all spawned tasks.
+///
+/// Holds clones of the daemon's shared state so callers can:
+/// - register additional agents *after* the daemon is running (typical
+///   for the gRPC service which accepts plugin connections lazily);
+/// - peek at the registry / agent table for diagnostics + tests;
+/// - issue cross-agent control signals (cancel) without going through
+///   the full scheduler tick.
 pub struct DaemonHandle {
     cancel: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
+    registry: AgentRegistry,
+    agents: Arc<RwLock<HashMap<AgentId, AgentChannels>>>,
+    register_tx: mpsc::Sender<AgentConn>,
 }
 
 impl DaemonHandle {
@@ -77,6 +87,56 @@ impl DaemonHandle {
         for t in self.tasks {
             let _ = t.await;
         }
+    }
+
+    /// Read-only view of the agent registry. Tests + the future
+    /// `hsmctl status` use this to introspect connection health.
+    pub fn registry(&self) -> &AgentRegistry {
+        &self.registry
+    }
+
+    /// Register a new agent connection at runtime. Used by the gRPC
+    /// service when a plugin opens its bidi stream. Returns
+    /// `Err` if the daemon is already shut down (registration channel
+    /// closed).
+    pub async fn enroll_agent(&self, conn: AgentConn) -> Result<(), AgentConn> {
+        self.register_tx.send(conn).await.map_err(|e| e.0)
+    }
+
+    /// Send a cancel signal for `cookie` to whichever agent currently
+    /// owns it. Returns `false` if no agent claims this cookie (already
+    /// finished or never dispatched).
+    pub async fn cancel(&self, agent_id: &AgentId, cookie: Cookie) -> bool {
+        let chans = self.agents.read().get(agent_id).cloned();
+        match chans {
+            Some(c) => c.cancel_tx.send(cookie).await.is_ok(),
+            None => false,
+        }
+    }
+
+    /// Build an [`AgentRegistrar`] closure that pushes new agent
+    /// connections into this handle's enrollment queue. Captures *only*
+    /// the mpsc sender — the registrar can be cheaply cloned and shared
+    /// across the gRPC service / connection acceptors without contending
+    /// for the rest of the handle's state.
+    ///
+    /// The returned closure is `Fn(AgentConn) -> Result<(), String>` so
+    /// it satisfies [`AgentRegistrar`]'s callable shape. The push
+    /// happens via `try_send` (non-blocking); if the daemon is shutting
+    /// down or the queue is unexpectedly full, the closure returns
+    /// `Err(reason)` and the gRPC service will abort the new
+    /// connection cleanly.
+    pub fn registrar(&self) -> crate::grpc::AgentRegistrar {
+        let tx = self.register_tx.clone();
+        Arc::new(move |conn| match tx.try_send(conn) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("daemon shutting down".into())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err("daemon enroll queue full".into())
+            }
+        })
     }
 }
 
@@ -97,7 +157,6 @@ pub struct Daemon<Sched, Store, Recv> {
 #[derive(Clone)]
 pub(crate) struct AgentChannels {
     pub action_tx: mpsc::Sender<DispatchedAction>,
-    #[allow(dead_code)] // M2d.1 doesn't yet exercise cancel route end-to-end.
     pub cancel_tx: mpsc::Sender<Cookie>,
 }
 
@@ -142,10 +201,44 @@ where
     }
 
     /// Start the recv + dispatch loops. Returns a [`DaemonHandle`] that
-    /// can be used to shut everything down.
+    /// callers use to enroll agents at runtime, peek state, and shut
+    /// down cleanly.
     pub fn start(mut self) -> DaemonHandle {
         let cancel = CancellationToken::new();
         let mut tasks = Vec::new();
+
+        // Channel used by external plugin acceptors (gRPC, in-proc test
+        // rigs) to push new agents into the daemon at runtime. The
+        // dispatcher's enrollment task drains this and runs the same
+        // register_agent logic the in-process tests use directly.
+        let (register_tx, mut register_rx) = mpsc::channel::<AgentConn>(32);
+        let enroll_cancel = cancel.clone();
+        let enroll_registry = self.registry.clone();
+        let enroll_agents = self.agents.clone();
+        let enroll_store = self.store.clone();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = enroll_cancel.cancelled() => {
+                        debug!(target: "hsmd.enroll", "shutdown");
+                        return;
+                    }
+                    Some(conn) = register_rx.recv() => {
+                        enroll_registry.register(conn.id.clone(), conn.archives.iter().copied());
+                        let chans = AgentChannels {
+                            action_tx: conn.action_tx,
+                            cancel_tx: conn.cancel_tx,
+                        };
+                        enroll_agents.write().insert(conn.id.clone(), chans);
+                        let _drain = spawn_status_drain(conn.id, conn.status_rx, enroll_store.clone());
+                        // _drain JoinHandle is intentionally not held —
+                        // the per-agent status drain runs until the
+                        // status_tx side closes (gRPC stream end / plugin
+                        // exit), which is the right shutdown trigger.
+                    }
+                }
+            }
+        }));
 
         // ---- recv loop ---------------------------------------------------
         let recv_cancel = cancel.clone();
@@ -210,7 +303,13 @@ where
             }
         }));
 
-        DaemonHandle { cancel, tasks }
+        DaemonHandle {
+            cancel,
+            tasks,
+            registry: self.registry,
+            agents: self.agents,
+            register_tx,
+        }
     }
 }
 

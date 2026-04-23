@@ -14,18 +14,25 @@ path = "src/lib.rs"
 [dependencies]
 hsm-core = { path = "../hsm-core" }
 hsm-plugin-sdk = { path = "../hsm-plugin-sdk" }
+hsm-proto = { path = "../hsm-proto" }
 hsm-scheduler = { path = "../hsm-scheduler" }
 hsm-store = { path = "../hsm-store" }
 lustre-llapi = { path = "../lustre-llapi" }
+bytes = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time", "macros", "net"] }
+tokio-stream = "0.1"
 tokio-util = { workspace = true }
+tonic = { workspace = true }
+tower = "0.5"
 tracing = { workspace = true }
 
 [dev-dependencies]
 hsm-plugin-noop = { path = "../plugins/noop" }
 bytes = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]

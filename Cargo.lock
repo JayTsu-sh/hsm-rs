@@ -397,10 +397,14 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "hsm-core",
+ "hsm-proto",
  "parking_lot",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
+ "tower 0.5.3",
  "tracing",
 ]
 
@@ -446,13 +450,18 @@ dependencies = [
  "hsm-core",
  "hsm-plugin-noop",
  "hsm-plugin-sdk",
+ "hsm-proto",
  "hsm-scheduler",
  "hsm-store",
+ "hyper-util",
  "lustre-llapi",
  "parking_lot",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]

@@ -10,11 +10,15 @@ authors.workspace = true
 
 [dependencies]
 hsm-core = { path = "../hsm-core" }
+hsm-proto = { path = "../hsm-proto" }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "net"] }
+tokio-stream = "0.1"
 tokio-util = { workspace = true }
+tonic = { workspace = true }
+tower = "0.5"
 tracing = { workspace = true }
 
 [dev-dependencies]

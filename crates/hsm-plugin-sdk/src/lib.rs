@@ -24,11 +24,13 @@ pub mod ctx;
 pub mod error;
 pub mod mover;
 pub mod progress;
+pub mod run;
 
 pub use ctx::{ActionCtx, ActionCtxBuilder};
 pub use error::{MoverError, MoverResult};
 pub use mover::Mover;
 pub use progress::{ProgressConfig, ProgressEvent, ProgressReporter};
+pub use run::{run, run_with_channel, RunConfig, RunError, RunResult};
 
 // Re-export types plugins frequently need from hsm-core so they only
 // need to add `hsm-plugin-sdk` to their Cargo.toml.

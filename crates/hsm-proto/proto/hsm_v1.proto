@@ -1,18 +1,25 @@
-// hsm-rs daemon ↔ local plugin protocol (M1 surface).
+// hsm-rs daemon ↔ local plugin protocol.
 //
-// Transport: gRPC over Unix Domain Socket. Plugins connect to
-// `$HSM_AGENT_SOCKET` on startup, register, then drive a long-lived
-// bidirectional `GetActions` stream while pushing `ActionStatus` updates
-// on the parallel `StatusStream`.
+// Transport: gRPC over Unix Domain Socket (or TCP for tests + remote
+// agents). One bidirectional stream per plugin process — the stream IS
+// the session. The plugin's first message must be Hello; the daemon's
+// first reply must be Welcome. After that:
 //
-// This is the *local* protocol; the coordinatool-compatible TCP/JSON
-// protocol is defined separately in `hsm.coordinator.v1` (M4).
+//   plugin → daemon : ActionStatus events (one per progress / terminal)
+//   daemon → plugin : ActionItem dispatches (Archive/Restore/Remove
+//                     are work; Cancel is a control signal — the
+//                     plugin trips the cookie's CancellationToken
+//                     instead of calling Mover)
+//
+// Connection close (either side) tears down the agent: the daemon
+// re-routes any in-flight actions to ArState::Waiting after a grace
+// period (M2d.2c).
 
 syntax = "proto3";
 
 package hsm.v1;
 
-// What the mover should do for one action.
+// What kind of work an ActionItem represents.
 enum ActionKind {
   ACTION_KIND_UNSPECIFIED = 0;
   ACTION_KIND_ARCHIVE     = 1;
@@ -21,80 +28,78 @@ enum ActionKind {
   ACTION_KIND_CANCEL      = 4;
 }
 
-// Existing object on the backend (consulted on RESTORE / REMOVE so the
-// mover can locate the archived bytes without re-deriving the key).
+// Backend-side metadata for an archived object. Round-tripped through
+// trusted.lhsm_uuid / hash / url xattrs on the Lustre file.
 message BackendObject {
-  string uuid = 1;       // backend-relative key (terrasync relative_path)
-  bytes  hash = 2;       // BLAKE3 (32 bytes); empty if not yet computed
-  string url  = 3;       // canonical URL incl. scheme
+  string uuid = 1;
+  bytes  hash = 2;     // BLAKE3, 32 bytes
+  string url  = 3;
 }
 
-// One unit of work pushed daemon -> plugin.
+// Plugin-side handshake. Sent first on the bidi stream.
+message Hello {
+  string agent_id     = 1;     // typically hostname:pid
+  repeated uint32 archive_ids = 2;
+  string version      = 3;     // plugin's own version string
+}
+
+// Daemon-side handshake reply.
+message Welcome {
+  string session_id = 1;       // diagnostic id; not load-bearing
+}
+
+// One unit of work. Cancel-kind items have only `cookie` set
+// meaningfully (path / extent / data are ignored).
 message ActionItem {
-  fixed64    cookie       = 1;   // kernel-issued action cookie
+  fixed64    cookie       = 1;
   uint32     archive_id   = 2;
   ActionKind kind         = 3;
-
-  // Filesystem path the mover should *read from* on archive/remove.
-  string     primary_path = 4;
-  // Filesystem path the mover should *write to* on restore (Lustre dfid open).
-  string     write_path   = 5;
-
-  uint64     offset       = 6;   // byte range to operate on
-  uint64     length       = 7;   // 0xffffffffffffffff means "whole file"
-
+  string     primary_path = 4;   // file to read (Archive/Remove)
+  string     write_path   = 5;   // file to write (Restore)
+  uint64     offset       = 6;
+  uint64     length       = 7;   // 0xffffffff_ffffffff = whole file
   bytes      data         = 8;   // opaque hai_data hint, untrusted
-
-  // For RESTORE / REMOVE, daemon attaches the BackendObject from xattrs.
-  BackendObject existing  = 9;
+  optional BackendObject existing = 9; // restore/remove target
 }
 
-// Plugin -> daemon progress / completion update.
+// Plugin → daemon status. `completed=false` is a non-terminal
+// progress tick. `completed=true` with `errno=0` is success; non-zero
+// `errno` is failure (use 125 for cancellation per Linux ECANCELED).
 //
-// `completed=false` is a periodic progress tick (no terminal state change).
-// `completed=true` with `errno=0` is success; non-zero errno is failure.
+// `bytes_advanced` is *cumulative* — daemon stores it as the
+// "furthest byte fully transferred" so out-of-order delivery doesn't
+// regress the store invariant.
 message ActionStatus {
-  fixed64 cookie    = 1;
-  uint64  offset    = 2;   // furthest byte fully transferred
-  uint64  length    = 3;   // total bytes for this transfer (info only)
-  bool    completed = 4;
-  int32   errno     = 5;   // POSIX errno, 0 on success / progress
-
-  // Set by the mover on successful ARCHIVE — daemon writes these xattrs
-  // before calling llapi_hsm_action_end.
-  BackendObject result = 6;
+  fixed64 cookie         = 1;
+  uint64  bytes_advanced = 2;
+  bool    completed      = 3;
+  int32   errno          = 4;
+  optional BackendObject result = 5;  // Archive only; xattr write input
 }
 
-// One-shot Empty for unary returns.
-message Empty {}
-
-// Plugin registration. Sent once per process startup.
-message RegisterReq {
-  string  agent_id     = 1;       // arbitrary, ideally hostname:pid
-  repeated uint32 archive_ids = 2; // archives this plugin can serve
-  string  version      = 3;       // plugin's own version string
+// Plugin → daemon stream message envelope.
+message FromPlugin {
+  oneof body {
+    Hello        hello  = 1;
+    ActionStatus status = 2;
+  }
 }
 
-message RegisterResp {
-  // Server-assigned session id; included on subsequent stream init.
-  string session_id = 1;
-}
-
-// Ack on the GetActions request stream — used so the plugin can flow-
-// control inflight count without TCP-level back-pressure tricks.
-message Ack {
-  fixed64 cookie = 1;   // 0 means "send next batch unconditionally"
+// Daemon → plugin stream message envelope.
+message ToPlugin {
+  oneof body {
+    Welcome    welcome = 1;
+    ActionItem action  = 2;
+  }
 }
 
 service DataMover {
-  // Plugin announces itself and its archive_ids.
-  rpc Register (RegisterReq) returns (RegisterResp);
-
-  // Long-lived bidi stream — daemon pushes actions, plugin acks for
-  // back-pressure. Plugin terminates the stream on shutdown.
-  rpc GetActions (stream Ack) returns (stream ActionItem);
-
-  // Long-lived client-streaming RPC — plugin pushes status updates;
-  // daemon collapses them and triggers llapi_hsm_action_progress / end.
-  rpc StatusStream (stream ActionStatus) returns (Empty);
+  // The single session RPC. Plugin opens one, sends Hello, then
+  // streams status events. Daemon accepts, sends Welcome, then streams
+  // action items (including Cancel as a control signal).
+  //
+  // Named `Open` rather than `Connect` because `connect` is already an
+  // inherent method on the generated tonic client (used for transport
+  // dial-up); having both produces a name collision.
+  rpc Open(stream FromPlugin) returns (stream ToPlugin);
 }

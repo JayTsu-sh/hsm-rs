@@ -34,10 +34,12 @@ pub mod agent;
 pub mod copytool_recv;
 pub mod daemon;
 pub mod error;
+pub mod grpc;
 pub mod inproc;
 
 pub use agent::{AgentConn, AgentSink, DispatchedAction};
 pub use copytool_recv::{MockRecvSource, RecvSource};
 pub use daemon::{Daemon, DaemonConfig, DaemonHandle};
 pub use error::{DaemonError, DaemonResult};
+pub use grpc::{AgentRegistrar, GrpcAgentService};
 pub use inproc::InProcessAgent;

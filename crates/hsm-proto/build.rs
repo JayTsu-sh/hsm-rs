@@ -19,9 +19,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        // Stable derives so generated types interop with the rest of the
-        // workspace without extra wrappers.
-        .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // Serde derives on the leaf message types — handy for log
+        // serialization + the M4 coordinatool-compatible TCP/JSON
+        // protocol. We deliberately don't apply this universally:
+        // the generated `oneof` enums for FromPlugin/ToPlugin would
+        // otherwise pull in serde paths through a derive that
+        // doesn't fit prost's representation.
+        .message_attribute("hsm.v1.BackendObject", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .message_attribute("hsm.v1.ActionItem",   "#[derive(serde::Serialize, serde::Deserialize)]")
+        .message_attribute("hsm.v1.ActionStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
         .compile_protos(&["proto/hsm_v1.proto"], &["proto"])?;
 
     Ok(())
