@@ -1,0 +1,20 @@
+[package]
+name = "hsm-scheduler"
+description = "HSM action scheduling: agent registry + policy chain (FifoPerKind, host-affinity, batching)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+
+[lints]
+workspace = true

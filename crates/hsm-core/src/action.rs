@@ -123,7 +123,7 @@ impl Extent {
 /// up to ~12 bytes by default). Schedulers may match on it (e.g. coordinatool
 /// `archive_on_hosts tag=…`); movers should treat it as untrusted and never
 /// splice it into filesystem paths or URLs without validation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Action {
     /// Kernel-issued action cookie. Unique per in-flight action.
     pub cookie: Cookie,

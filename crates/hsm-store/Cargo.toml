@@ -1,0 +1,23 @@
+[package]
+name = "hsm-store"
+description = "Persistent action state for hsm-rs (ActionStore trait + in-memory impl)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

@@ -6,6 +6,8 @@ members = [
     "crates/lustre-hsm-uapi",
     "crates/lustre-llapi",
     "crates/hsm-proto",
+    "crates/hsm-store",
+    "crates/hsm-scheduler",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.
 exclude = ["spikes"]
@@ -21,8 +23,11 @@ authors = ["jay.xu <jay.xu@lenovonetapp.com>"]
 [workspace.dependencies]
 # Cross-cutting deps pinned at the workspace level.
 bytes = { version = "1", features = ["serde"] }
+dashmap = "6"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+tokio = "1"
 tracing = "0.1"
 
 # FFI / proto build-time
