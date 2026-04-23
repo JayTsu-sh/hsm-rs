@@ -4,6 +4,7 @@ members = [
     "crates/hsm-core",
     "crates/lustre-sys",
     "crates/lustre-hsm-uapi",
+    "crates/lustre-llapi",
     "crates/hsm-proto",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.

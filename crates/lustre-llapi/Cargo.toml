@@ -1,0 +1,23 @@
+[package]
+name = "lustre-llapi"
+description = "Safe wrapper around liblustreapi HSM operations + an in-memory mock copytool for tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+lustre-hsm-uapi = { path = "../lustre-hsm-uapi" }
+lustre-sys = { path = "../lustre-sys" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+
+[lints]
+workspace = true

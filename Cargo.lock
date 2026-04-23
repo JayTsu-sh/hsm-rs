@@ -551,6 +551,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lustre-llapi"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "hex",
+ "hsm-core",
+ "lustre-hsm-uapi",
+ "lustre-sys",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "lustre-sys"
 version = "0.0.1"
 dependencies = [
