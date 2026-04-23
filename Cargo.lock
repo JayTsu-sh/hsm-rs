@@ -380,6 +380,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hsm-plugin-noop"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "hsm-core",
+ "hsm-plugin-sdk",
+ "parking_lot",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hsm-plugin-sdk"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "hsm-core",
+ "parking_lot",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hsm-proto"
 version = "0.0.1"
 dependencies = [

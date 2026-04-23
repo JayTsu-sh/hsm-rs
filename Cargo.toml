@@ -8,6 +8,8 @@ members = [
     "crates/hsm-proto",
     "crates/hsm-store",
     "crates/hsm-scheduler",
+    "crates/hsm-plugin-sdk",
+    "crates/plugins/noop",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.
 exclude = ["spikes"]
@@ -28,6 +30,7 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio = "1"
+tokio-util = "0.7"
 tracing = "0.1"
 
 # FFI / proto build-time

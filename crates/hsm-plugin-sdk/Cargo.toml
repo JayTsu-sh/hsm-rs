@@ -1,0 +1,24 @@
+[package]
+name = "hsm-plugin-sdk"
+description = "SDK for hsm-rs data-mover plugins (Mover trait, ActionCtx, ProgressReporter)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
