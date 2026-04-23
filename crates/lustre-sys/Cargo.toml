@@ -1,0 +1,21 @@
+[package]
+name = "lustre-sys"
+description = "Raw FFI bindings to liblustreapi + Lustre UAPI headers (HSM subset)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+links = "lustreapi"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+bindgen = { workspace = true }
+
+# This crate is fundamentally unsafe (raw FFI). Suppress the workspace
+# `unsafe_code = "warn"` lint inside the crate via #![allow] in lib.rs.
+[lints]
+workspace = true

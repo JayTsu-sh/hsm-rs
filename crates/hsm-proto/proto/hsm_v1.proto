@@ -1,0 +1,100 @@
+// hsm-rs daemon ↔ local plugin protocol (M1 surface).
+//
+// Transport: gRPC over Unix Domain Socket. Plugins connect to
+// `$HSM_AGENT_SOCKET` on startup, register, then drive a long-lived
+// bidirectional `GetActions` stream while pushing `ActionStatus` updates
+// on the parallel `StatusStream`.
+//
+// This is the *local* protocol; the coordinatool-compatible TCP/JSON
+// protocol is defined separately in `hsm.coordinator.v1` (M4).
+
+syntax = "proto3";
+
+package hsm.v1;
+
+// What the mover should do for one action.
+enum ActionKind {
+  ACTION_KIND_UNSPECIFIED = 0;
+  ACTION_KIND_ARCHIVE     = 1;
+  ACTION_KIND_RESTORE     = 2;
+  ACTION_KIND_REMOVE      = 3;
+  ACTION_KIND_CANCEL      = 4;
+}
+
+// Existing object on the backend (consulted on RESTORE / REMOVE so the
+// mover can locate the archived bytes without re-deriving the key).
+message BackendObject {
+  string uuid = 1;       // backend-relative key (terrasync relative_path)
+  bytes  hash = 2;       // BLAKE3 (32 bytes); empty if not yet computed
+  string url  = 3;       // canonical URL incl. scheme
+}
+
+// One unit of work pushed daemon -> plugin.
+message ActionItem {
+  fixed64    cookie       = 1;   // kernel-issued action cookie
+  uint32     archive_id   = 2;
+  ActionKind kind         = 3;
+
+  // Filesystem path the mover should *read from* on archive/remove.
+  string     primary_path = 4;
+  // Filesystem path the mover should *write to* on restore (Lustre dfid open).
+  string     write_path   = 5;
+
+  uint64     offset       = 6;   // byte range to operate on
+  uint64     length       = 7;   // 0xffffffffffffffff means "whole file"
+
+  bytes      data         = 8;   // opaque hai_data hint, untrusted
+
+  // For RESTORE / REMOVE, daemon attaches the BackendObject from xattrs.
+  BackendObject existing  = 9;
+}
+
+// Plugin -> daemon progress / completion update.
+//
+// `completed=false` is a periodic progress tick (no terminal state change).
+// `completed=true` with `errno=0` is success; non-zero errno is failure.
+message ActionStatus {
+  fixed64 cookie    = 1;
+  uint64  offset    = 2;   // furthest byte fully transferred
+  uint64  length    = 3;   // total bytes for this transfer (info only)
+  bool    completed = 4;
+  int32   errno     = 5;   // POSIX errno, 0 on success / progress
+
+  // Set by the mover on successful ARCHIVE — daemon writes these xattrs
+  // before calling llapi_hsm_action_end.
+  BackendObject result = 6;
+}
+
+// One-shot Empty for unary returns.
+message Empty {}
+
+// Plugin registration. Sent once per process startup.
+message RegisterReq {
+  string  agent_id     = 1;       // arbitrary, ideally hostname:pid
+  repeated uint32 archive_ids = 2; // archives this plugin can serve
+  string  version      = 3;       // plugin's own version string
+}
+
+message RegisterResp {
+  // Server-assigned session id; included on subsequent stream init.
+  string session_id = 1;
+}
+
+// Ack on the GetActions request stream — used so the plugin can flow-
+// control inflight count without TCP-level back-pressure tricks.
+message Ack {
+  fixed64 cookie = 1;   // 0 means "send next batch unconditionally"
+}
+
+service DataMover {
+  // Plugin announces itself and its archive_ids.
+  rpc Register (RegisterReq) returns (RegisterResp);
+
+  // Long-lived bidi stream — daemon pushes actions, plugin acks for
+  // back-pressure. Plugin terminates the stream on shutdown.
+  rpc GetActions (stream Ack) returns (stream ActionItem);
+
+  // Long-lived client-streaming RPC — plugin pushes status updates;
+  // daemon collapses them and triggers llapi_hsm_action_progress / end.
+  rpc StatusStream (stream ActionStatus) returns (Empty);
+}
