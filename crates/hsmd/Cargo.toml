@@ -1,0 +1,32 @@
+[package]
+name = "hsmd"
+description = "hsm-rs daemon — orchestrates copytool recv → scheduler → agent dispatch → store updates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+hsm-plugin-sdk = { path = "../hsm-plugin-sdk" }
+hsm-scheduler = { path = "../hsm-scheduler" }
+hsm-store = { path = "../hsm-store" }
+lustre-llapi = { path = "../lustre-llapi" }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+hsm-plugin-noop = { path = "../plugins/noop" }
+bytes = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

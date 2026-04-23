@@ -25,7 +25,7 @@ pub mod error;
 pub mod mover;
 pub mod progress;
 
-pub use ctx::ActionCtx;
+pub use ctx::{ActionCtx, ActionCtxBuilder};
 pub use error::{MoverError, MoverResult};
 pub use mover::Mover;
 pub use progress::{ProgressConfig, ProgressEvent, ProgressReporter};

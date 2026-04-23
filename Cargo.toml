@@ -10,6 +10,7 @@ members = [
     "crates/hsm-scheduler",
     "crates/hsm-plugin-sdk",
     "crates/plugins/noop",
+    "crates/hsmd",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.
 exclude = ["spikes"]
