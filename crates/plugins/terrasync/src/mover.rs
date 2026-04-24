@@ -30,31 +30,37 @@ use tracing::{debug, info, warn};
 
 use crate::config::ArchiveLayout;
 
-/// Mover backed by terrasync `LocalStorage` for source + destination.
+/// Mover backed by terrasync `StorageEnum` for source + destination.
 ///
-/// `src` reads from the Lustre mountpoint (or its parent) so that
-/// absolute paths resolve correctly via `LocalStorage::root_path`.
-/// `dst` writes under `layout.root` — the per-action subpath comes
-/// from `layout.relative_path()`.
+/// `src` always reads from the local POSIX namespace via
+/// `LocalStorage("/")` (the Lustre mountpoint is just a sub-path).
+/// `dst` is supplied by the caller — file:// in M3a, S3 / NFS / CIFS
+/// pluggable in M3b without touching mover internals.
 #[derive(Clone)]
 pub struct TerrasyncMover {
     /// Source storage rooted at `/` so any absolute primary path
     /// resolves as a relative path from `/`.
     src: Arc<StorageEnum>,
-    /// Destination storage rooted at the archive root.
+    /// Destination storage. Backend-agnostic; constructor's choice.
     dst: Arc<StorageEnum>,
     /// Layout helper for `(archive_id, fid)` → (path, url) conversion.
     layout: ArchiveLayout,
 }
 
 impl TerrasyncMover {
-    /// New mover with `archive_root` as the destination LocalStorage
-    /// root. The source LocalStorage is rooted at `/`.
+    /// New mover with an explicit destination [`StorageEnum`] and
+    /// archive layout. The source is always `LocalStorage("/")`.
+    pub fn with_dst(dst: Arc<StorageEnum>, layout: ArchiveLayout) -> Self {
+        let src = Arc::new(StorageEnum::Local(LocalStorage::new("/", None)));
+        Self { src, dst, layout }
+    }
+
+    /// Convenience for the file:// path: builds a `LocalStorage` at
+    /// `archive_root` and an [`ArchiveLayout`] rooted at the same.
     pub fn new(archive_root: impl Into<PathBuf>) -> Self {
         let layout = ArchiveLayout::new(archive_root);
-        let src = Arc::new(StorageEnum::Local(LocalStorage::new("/", None)));
         let dst = Arc::new(StorageEnum::Local(LocalStorage::new(layout.root.clone(), None)));
-        Self { src, dst, layout }
+        Self::with_dst(dst, layout)
     }
 
     /// Returns the archive layout helper (useful for tests inspecting

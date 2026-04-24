@@ -23,7 +23,7 @@ const PATH_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
-/// Errors decoding a `file://…` URL into [`BackendUrl`].
+/// Errors decoding a backend URL into [`BackendUrl`].
 #[derive(Debug, Error)]
 pub enum BackendUrlError {
     /// Top-level URL parse failure.
@@ -36,9 +36,9 @@ pub enum BackendUrlError {
         source: url::ParseError,
     },
 
-    /// Scheme is something other than `file`.
-    #[error("unsupported scheme {scheme:?} (M2e only supports file://)")]
-    UnsupportedScheme {
+    /// Scheme is one we don't know how to dispatch.
+    #[error("unknown scheme {scheme:?} (known: file, s3, nfs, cifs)")]
+    UnknownScheme {
         /// Scheme we found.
         scheme: String,
     },
@@ -51,47 +51,104 @@ pub enum BackendUrlError {
     },
 
     /// Percent-decoded path contained invalid UTF-8.
-    #[error("file:// URL path is not valid UTF-8")]
+    #[error("backend URL path is not valid UTF-8")]
     InvalidUtf8,
 }
 
-/// Parsed backend URL.
+/// Backend URL scheme. The terrasync mover dispatches on this when
+/// constructing per-action `(uuid, hash, url)` triples and on
+/// Restore / Remove when deciding which `StorageEnum` to read from.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BackendScheme {
+    /// `file://<path>` — local POSIX or Lustre-mounted filesystem.
+    File,
+    /// `s3://<bucket>/<prefix>` — AWS S3 or compatible.
+    S3,
+    /// `nfs://<server>/<export>` — NFSv3 / NFSv4 export.
+    Nfs,
+    /// `cifs://<host>/<share>` — SMB / CIFS share.
+    Cifs,
+}
+
+impl BackendScheme {
+    /// Lowercase scheme string as it appears in the URL.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendScheme::File => "file",
+            BackendScheme::S3 => "s3",
+            BackendScheme::Nfs => "nfs",
+            BackendScheme::Cifs => "cifs",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "file" => Some(Self::File),
+            "s3" => Some(Self::S3),
+            "nfs" => Some(Self::Nfs),
+            "cifs" => Some(Self::Cifs),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed backend URL. Carries both the recognised scheme and the
+/// scheme-specific payload (currently just the path component, since
+/// host/port/credentials live alongside the URL in the plugin's TOML
+/// config and are not derived from the URL itself).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendUrl {
-    /// Filesystem path portion of the URL (e.g.
-    /// `/var/hsm-archive/1/0x200000401:0x12:0x0`).
+    /// Recognised scheme.
+    pub scheme: BackendScheme,
+    /// For `file://` this is the absolute filesystem path. For
+    /// `s3://bucket/prefix` it is `/bucket/prefix` (preserved as the
+    /// URL-style path; bucket vs prefix split is the caller's job).
+    /// For `nfs://server/export` it is `/export`. For
+    /// `cifs://host/share` it is `/share`.
     pub path: PathBuf,
+    /// `host` portion of the URL, when one is present (s3 / nfs /
+    /// cifs). `None` for `file://`.
+    pub host: Option<String>,
 }
 
 impl BackendUrl {
-    /// Parse a `file://…` URL. Other schemes are rejected (M3 will lift
-    /// this restriction).
+    /// Parse any of the supported schemes. Returns
+    /// [`BackendUrlError::UnknownScheme`] for unrecognised schemes.
     pub fn parse(url: &str) -> Result<Self, BackendUrlError> {
         let parsed = Url::parse(url).map_err(|e| BackendUrlError::Parse {
             url: url.into(),
             source: e,
         })?;
-        if parsed.scheme() != "file" {
-            return Err(BackendUrlError::UnsupportedScheme {
+        let scheme = BackendScheme::parse(parsed.scheme()).ok_or_else(|| {
+            BackendUrlError::UnknownScheme {
                 scheme: parsed.scheme().into(),
-            });
-        }
+            }
+        })?;
         let raw_path = parsed.path();
-        if raw_path.is_empty() {
+        if scheme == BackendScheme::File && raw_path.is_empty() {
             return Err(BackendUrlError::EmptyPath { url: url.into() });
         }
         let decoded = percent_decode_str(raw_path)
             .decode_utf8()
             .map_err(|_| BackendUrlError::InvalidUtf8)?;
         Ok(Self {
+            scheme,
             path: PathBuf::from(decoded.into_owned()),
+            host: parsed.host_str().map(|h| h.to_string()),
         })
     }
 
-    /// Render this URL back to its canonical `file://<path>` form.
+    /// Render this URL back to a canonical form.
     pub fn render(&self) -> String {
-        let s = self.path.to_string_lossy();
-        format!("file://{}", utf8_percent_encode(&s, PATH_ENCODE))
+        let path = self.path.to_string_lossy();
+        let encoded = utf8_percent_encode(&path, PATH_ENCODE);
+        match (self.scheme, self.host.as_deref()) {
+            (BackendScheme::File, _) => format!("file://{encoded}"),
+            (scheme, Some(host)) => format!("{}://{host}{encoded}", scheme.as_str()),
+            // Non-file scheme without a host is unusual — render with
+            // an empty authority so round-trips still work.
+            (scheme, None) => format!("{}://{encoded}", scheme.as_str()),
+        }
     }
 }
 
@@ -125,10 +182,15 @@ impl ArchiveLayout {
         self.root.join(Self::relative_path(archive_id, fid))
     }
 
-    /// Backend URL of `(archive_id, fid)`.
+    /// Backend URL of `(archive_id, fid)`. Layout currently always
+    /// emits `file://` URLs since M3a only ships the LocalStorage
+    /// destination; M3b will widen this to the layout's configured
+    /// scheme.
     pub fn url(&self, archive_id: ArchiveId, fid: Fid) -> BackendUrl {
         BackendUrl {
+            scheme: BackendScheme::File,
             path: self.full_path(archive_id, fid),
+            host: None,
         }
     }
 
@@ -155,10 +217,12 @@ mod tests {
     fn url_round_trips_through_parse_render() {
         let url = "file:///var/hsm-archive/1/0x200000401:0x12:0x0";
         let parsed = BackendUrl::parse(url).unwrap();
+        assert_eq!(parsed.scheme, BackendScheme::File);
         assert_eq!(
             parsed.path,
             PathBuf::from("/var/hsm-archive/1/0x200000401:0x12:0x0")
         );
+        assert_eq!(parsed.host, None);
         assert_eq!(parsed.render(), url);
     }
 
@@ -171,14 +235,57 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_file_scheme() {
-        let err = BackendUrl::parse("s3://bucket/key").unwrap_err();
-        assert!(matches!(err, BackendUrlError::UnsupportedScheme { .. }));
+    fn s3_url_parses_with_host_and_path() {
+        let url = "s3://my-bucket/prefix/1/0x1:0x2:0x0";
+        let parsed = BackendUrl::parse(url).unwrap();
+        assert_eq!(parsed.scheme, BackendScheme::S3);
+        assert_eq!(parsed.host.as_deref(), Some("my-bucket"));
+        assert_eq!(parsed.path, PathBuf::from("/prefix/1/0x1:0x2:0x0"));
+        assert_eq!(parsed.render(), url);
+    }
+
+    #[test]
+    fn nfs_url_parses_with_host_and_export() {
+        let url = "nfs://nfs.example.com/exports/hsm";
+        let parsed = BackendUrl::parse(url).unwrap();
+        assert_eq!(parsed.scheme, BackendScheme::Nfs);
+        assert_eq!(parsed.host.as_deref(), Some("nfs.example.com"));
+        assert_eq!(parsed.path, PathBuf::from("/exports/hsm"));
+        assert_eq!(parsed.render(), url);
+    }
+
+    #[test]
+    fn cifs_url_parses_with_host_and_share() {
+        let url = "cifs://samba.example.com/hsm-share";
+        let parsed = BackendUrl::parse(url).unwrap();
+        assert_eq!(parsed.scheme, BackendScheme::Cifs);
+        assert_eq!(parsed.host.as_deref(), Some("samba.example.com"));
+        assert_eq!(parsed.path, PathBuf::from("/hsm-share"));
+        assert_eq!(parsed.render(), url);
+    }
+
+    #[test]
+    fn rejects_unknown_scheme() {
+        let err = BackendUrl::parse("ftp://server/path").unwrap_err();
+        assert!(matches!(err, BackendUrlError::UnknownScheme { .. }));
     }
 
     #[test]
     fn rejects_garbage() {
         assert!(BackendUrl::parse("not-a-url").is_err());
+    }
+
+    #[test]
+    fn scheme_str_round_trip() {
+        for s in [
+            BackendScheme::File,
+            BackendScheme::S3,
+            BackendScheme::Nfs,
+            BackendScheme::Cifs,
+        ] {
+            assert_eq!(BackendScheme::parse(s.as_str()), Some(s));
+        }
+        assert_eq!(BackendScheme::parse("ftp"), None);
     }
 
     #[test]

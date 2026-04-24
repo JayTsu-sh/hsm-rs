@@ -240,7 +240,7 @@ fn subprocess_archive_release_restore_remove_round_trip() {
                 socket_path = "{socket}"
                 agent_id = "terra-rt-1"
                 archive_ids = [1]
-                archive_root = "{backend}"
+                archive_root_url = "file://{backend}"
                 log_filter = "info,hsm.plugin.terrasync=debug"
             "#,
             socket = socket_path.display(),

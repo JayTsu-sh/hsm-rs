@@ -20,9 +20,10 @@ use std::sync::Arc;
 
 use hsm_core::ArchiveId;
 use hsm_plugin_sdk::{run_with_channel, RunConfig};
-use hsm_plugin_terrasync::TerrasyncMover;
+use hsm_plugin_terrasync::{ArchiveLayout, BackendScheme, BackendUrl, TerrasyncMover};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
+use storage_v2::{LocalStorage, StorageEnum};
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio::signal::unix::{signal, SignalKind};
@@ -63,7 +64,10 @@ struct PluginConfig {
     socket_path: PathBuf,
     agent_id: String,
     archive_ids: Vec<u32>,
-    archive_root: PathBuf,
+    /// Backend URL (`file://<path>`, `s3://...`, `nfs://...`,
+    /// `cifs://...`). M3a wires `file://` only; other schemes parse
+    /// but error at startup with a clear "not yet wired" message.
+    archive_root_url: String,
     #[serde(default)]
     log_filter: Option<String>,
 }
@@ -137,7 +141,7 @@ async fn main() -> std::process::ExitCode {
         socket = %cfg.socket_path.display(),
         agent = %cfg.agent_id,
         archives = ?cfg.archive_ids,
-        archive_root = %cfg.archive_root.display(),
+        archive_root_url = %cfg.archive_root_url,
         "starting"
     );
 
@@ -145,23 +149,32 @@ async fn main() -> std::process::ExitCode {
         error!(target: "hsm.plugin.terrasync", "archive_ids must be non-empty");
         return std::process::ExitCode::from(2);
     }
-    if !cfg.archive_root.is_absolute() {
-        error!(
-            target: "hsm.plugin.terrasync",
-            archive_root = %cfg.archive_root.display(),
-            "archive_root must be an absolute path"
-        );
-        return std::process::ExitCode::from(2);
-    }
-    if let Err(e) = std::fs::create_dir_all(&cfg.archive_root) {
-        error!(
-            target: "hsm.plugin.terrasync",
-            archive_root = %cfg.archive_root.display(),
-            error = %e,
-            "create archive_root failed"
-        );
-        return std::process::ExitCode::from(1);
-    }
+
+    // Parse the URL up front so we fail at startup, not on the first
+    // dispatched action.
+    let parsed = match BackendUrl::parse(&cfg.archive_root_url) {
+        Ok(p) => p,
+        Err(e) => {
+            error!(
+                target: "hsm.plugin.terrasync",
+                url = %cfg.archive_root_url, error = %e,
+                "archive_root_url parse failed"
+            );
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let mover = match build_mover(&parsed) {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            error!(
+                target: "hsm.plugin.terrasync",
+                url = %cfg.archive_root_url, error = %e,
+                "destination storage construction failed"
+            );
+            return std::process::ExitCode::from(2);
+        }
+    };
 
     // --- connect to daemon --------------------------------------------------
     let socket_path = cfg.socket_path.clone();
@@ -188,7 +201,6 @@ async fn main() -> std::process::ExitCode {
     };
     info!(target: "hsm.plugin.terrasync", "connected to daemon");
 
-    let mover = Arc::new(TerrasyncMover::new(cfg.archive_root.clone()));
     let archive_ids: Vec<ArchiveId> = cfg.archive_ids.iter().copied().map(ArchiveId::new).collect();
     let run_cfg = RunConfig::new(cfg.agent_id.clone(), archive_ids);
     let run_task = tokio::spawn(async move { run_with_channel(channel, mover, run_cfg).await });
@@ -218,6 +230,38 @@ async fn main() -> std::process::ExitCode {
 
     info!(target: "hsm.plugin.terrasync", "exited");
     exit
+}
+
+/// Build a [`TerrasyncMover`] for the parsed backend URL. M3a wires
+/// `file://` end-to-end. Other schemes (`s3://`, `nfs://`, `cifs://`)
+/// parse cleanly upstream but fail here with a "not yet wired"
+/// message so deployments don't silently fall back to an unintended
+/// backend.
+fn build_mover(url: &BackendUrl) -> Result<TerrasyncMover, String> {
+    match url.scheme {
+        BackendScheme::File => {
+            if !url.path.is_absolute() {
+                return Err(format!(
+                    "file:// URL path must be absolute, got {}",
+                    url.path.display()
+                ));
+            }
+            std::fs::create_dir_all(&url.path).map_err(|e| {
+                format!("create archive_root {}: {e}", url.path.display())
+            })?;
+            let layout = ArchiveLayout::new(url.path.clone());
+            let dst = Arc::new(StorageEnum::Local(LocalStorage::new(
+                layout.root.clone(),
+                None,
+            )));
+            Ok(TerrasyncMover::with_dst(dst, layout))
+        }
+        BackendScheme::S3 | BackendScheme::Nfs | BackendScheme::Cifs => Err(format!(
+            "scheme {:?} parsed but not yet wired in this binary; M3b will add \
+             credentials + connection config (see crates/plugins/terrasync TODO)",
+            url.scheme.as_str()
+        )),
+    }
 }
 
 async fn wait_for_shutdown_signal() {

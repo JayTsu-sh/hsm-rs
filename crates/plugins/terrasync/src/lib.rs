@@ -55,5 +55,5 @@
 pub mod config;
 pub mod mover;
 
-pub use config::{ArchiveLayout, BackendUrl};
+pub use config::{ArchiveLayout, BackendScheme, BackendUrl, BackendUrlError};
 pub use mover::TerrasyncMover;

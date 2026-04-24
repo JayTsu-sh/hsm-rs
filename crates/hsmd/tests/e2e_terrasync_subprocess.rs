@@ -240,7 +240,7 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
                 socket_path = "{socket}"
                 agent_id = "terra-subproc-1"
                 archive_ids = [1]
-                archive_root = "{backend}"
+                archive_root_url = "file://{backend}"
                 log_filter = "info,hsm.plugin.terrasync=debug"
             "#,
             socket = socket_path.display(),
