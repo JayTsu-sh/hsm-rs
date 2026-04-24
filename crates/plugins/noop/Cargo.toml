@@ -8,12 +8,26 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hsm-plugin-noop"
+path = "src/bin/hsm-plugin-noop.rs"
+
 [dependencies]
 hsm-plugin-sdk = { path = "../../hsm-plugin-sdk" }
 hsm-core = { path = "../../hsm-core" }
+hyper-util = { version = "0.1", features = ["tokio"] }
 parking_lot = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "rt"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "rt-multi-thread", "macros", "net", "signal"] }
+tonic = { workspace = true }
+toml = "0.8"
+tower = "0.5"
 tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

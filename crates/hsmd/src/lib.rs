@@ -31,6 +31,7 @@
 #![warn(missing_docs)]
 
 pub mod agent;
+pub mod config;
 pub mod copytool_recv;
 pub mod daemon;
 pub mod error;
