@@ -316,7 +316,7 @@ fn build_ctx_from_proto(
 ) -> crate::ctx::ActionCtx {
     let mut b = ActionCtxBuilder::default()
         .cookie(Cookie::new(item.cookie))
-        .fid(Fid::ZERO) // Daemon strips fid in M2d.2; FID resolution is M2d.2c.
+        .fid(Fid::new(item.fid_seq, item.fid_oid, item.fid_ver))
         .archive_id(ArchiveId::new(item.archive_id))
         .kind(kind)
         .extent(extent)

@@ -257,6 +257,9 @@ fn dispatched_to_proto(d: DispatchedAction) -> pb::ActionItem {
         length: d.action.extent.length,
         data: d.action.data.to_vec(),
         existing: d.existing.map(backend_obj_to_proto),
+        fid_seq: d.action.fid.seq,
+        fid_oid: d.action.fid.oid,
+        fid_ver: d.action.fid.ver,
     }
 }
 

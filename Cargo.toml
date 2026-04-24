@@ -10,6 +10,7 @@ members = [
     "crates/hsm-scheduler",
     "crates/hsm-plugin-sdk",
     "crates/plugins/noop",
+    "crates/plugins/terrasync",
     "crates/hsmd",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.
@@ -42,6 +43,13 @@ tonic-build = "0.12"
 
 # Test deps
 hex = "0.4"
+
+# terrasync-rs's storage_v2 pulls nfs-rs / smb from forks instead of
+# crates.io. Mirror its [patch.crates-io] table so cargo can resolve
+# them when we depend on storage_v2 by path.
+[patch.crates-io]
+nfs-rs = { git = "https://github.com/JayTsu-sh/nfs-rs.git" }
+smb = { git = "https://github.com/JayTsu-sh/smb-rs.git" }
 
 [workspace.lints.rust]
 # Production crates should mark unsafe explicitly. lustre-sys is exempt

@@ -60,6 +60,11 @@ message ActionItem {
   uint64     length       = 7;   // 0xffffffff_ffffffff = whole file
   bytes      data         = 8;   // opaque hai_data hint, untrusted
   optional BackendObject existing = 9; // restore/remove target
+  // Lustre FID (seq:oid:ver). Plugins that route by FID (terrasync,
+  // anything writing per-FID backend object names) need this.
+  fixed64    fid_seq      = 10;
+  fixed32    fid_oid      = 11;
+  fixed32    fid_ver      = 12;
 }
 
 // Plugin → daemon status. `completed=false` is a non-terminal

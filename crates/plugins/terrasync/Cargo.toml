@@ -1,0 +1,44 @@
+[package]
+name = "hsm-plugin-terrasync"
+description = "hsm-rs Mover backed by terrasync-rs storage_v2 (file:// in M2e; S3/NFS/CIFS in M3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hsm-plugin-terrasync"
+path = "src/bin/hsm-plugin-terrasync.rs"
+
+[dependencies]
+hsm-core = { path = "../../hsm-core" }
+hsm-plugin-sdk = { path = "../../hsm-plugin-sdk" }
+storage_v2 = { path = "../../../../terrasync-rs/crates/storage_v2" }
+
+blake3 = "1"
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = "2"
+serde = { workspace = true }
+thiserror = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { workspace = true, features = ["sync", "fs", "rt", "rt-multi-thread", "macros", "net", "signal", "time"] }
+tonic = { workspace = true }
+toml = "0.8"
+tower = "0.5"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
