@@ -2317,6 +2317,7 @@ name = "hsmd"
 version = "0.0.1"
 dependencies = [
  "bytes 1.11.1",
+ "dashmap",
  "hsm-core",
  "hsm-plugin-noop",
  "hsm-plugin-sdk",
@@ -2328,6 +2329,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2337,6 +2339,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "xattr",
 ]
 
 [[package]]
@@ -3924,7 +3927,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5110,6 +5113,7 @@ dependencies = [
  "soft-canonicalize",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
  "utils",
@@ -6557,6 +6561,16 @@ dependencies = [
  "rand_core 0.9.5",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

@@ -26,6 +26,8 @@ bytes = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "time", "macros", "net", "signal", "fs"] }
+xattr = "1"
+dashmap = { workspace = true }
 tokio-stream = "0.1"
 tokio-util = { workspace = true }
 tonic = { workspace = true }
@@ -41,7 +43,9 @@ hsm-plugin-noop = { path = "../plugins/noop" }
 bytes = { workspace = true }
 hyper-util = { version = "0.1", features = ["tokio"] }
 serde_json = "1"
+tempfile = "3"
 tower = "0.5"
+xattr = "1"
 
 [lints]
 workspace = true

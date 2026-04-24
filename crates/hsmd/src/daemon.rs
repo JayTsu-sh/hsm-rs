@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hsm_core::{ActionRecord, AgentId, ArState, Cookie, Extent};
+use dashmap::DashMap;
+use hsm_core::{ActionKind, ActionRecord, AgentId, ArState, Cookie, Extent};
 use hsm_scheduler::{AgentRegistry, Assignment, Scheduler};
 use hsm_store::ActionStore;
 use parking_lot::RwLock;
@@ -36,6 +37,17 @@ use tracing::{debug, error, info, warn};
 use crate::agent::{ActionStatus, AgentConn, DispatchedAction};
 use crate::copytool_recv::RecvSource;
 use crate::error::DaemonError;
+use crate::xattr_store::{self, XattrNamespace};
+
+/// Linux `ENODATA` — returned when a Restore/Remove is issued for a
+/// file with no `trusted.lhsm_*` xattrs (i.e. never archived).
+const ENODATA: i32 = 61;
+
+/// In-flight `(cookie → primary_path)` map used by the dispatch loop
+/// to tell the status drain task where to write `trusted.lhsm_*`
+/// xattrs on successful Archive completion. Entries are removed on
+/// any terminal status.
+type PendingPaths = Arc<DashMap<Cookie, PathBuf>>;
 
 /// Tunables for the daemon main loop.
 #[derive(Clone, Debug)]
@@ -51,6 +63,18 @@ pub struct DaemonConfig {
     /// In M2d.1 the test rig uses `/tmp/...` and skips real FID
     /// resolution; M2d.2 plugs in `lustre-llapi` helpers.
     pub mountpoint: PathBuf,
+    /// Which xattr namespace the daemon writes the per-file
+    /// [`BackendObject`] into after a successful Archive (and reads
+    /// from on Restore / Remove dispatch).
+    ///
+    /// - `Some(Trusted)` — production Lustre (`trusted.lhsm_*`,
+    ///   requires `CAP_SYS_ADMIN`).
+    /// - `Some(User)` — dev / CI without root (`user.lhsm_*`).
+    /// - `None` — disable xattr persistence entirely. Restore /
+    ///   Remove will fail with ENODATA (no metadata to look up).
+    ///   Used by in-process tests that don't materialize the
+    ///   stub `__fid__<fid>` files on disk.
+    pub xattr_namespace: Option<crate::xattr_store::XattrNamespace>,
 }
 
 impl Default for DaemonConfig {
@@ -59,6 +83,11 @@ impl Default for DaemonConfig {
             tick_interval: Duration::from_millis(50),
             max_per_tick: 32,
             mountpoint: PathBuf::from("/mnt/lustre"),
+            // Default OFF for the library-level config (used by
+            // in-process tests that don't write real files). The
+            // production binary's TOML config flips this to
+            // `Some(Trusted)`.
+            xattr_namespace: None,
         }
     }
 }
@@ -152,6 +181,9 @@ pub struct Daemon<Sched, Store, Recv> {
     /// Status_rx for each agent is owned by the per-agent status drain
     /// task; once spawned it doesn't need to live in the daemon struct.
     pub(crate) agents: Arc<RwLock<HashMap<AgentId, AgentChannels>>>,
+    /// Per-cookie primary_path stash so the per-agent status drain
+    /// can find the file to write xattrs to on Archive completion.
+    pub(crate) pending_paths: PendingPaths,
 }
 
 #[derive(Clone)]
@@ -176,6 +208,7 @@ where
             recv,
             config,
             agents: Arc::default(),
+            pending_paths: Arc::new(DashMap::new()),
         }
     }
 
@@ -197,6 +230,8 @@ where
             conn.id,
             conn.status_rx,
             self.store.clone(),
+            self.pending_paths.clone(),
+            self.config.xattr_namespace,
         )
     }
 
@@ -216,6 +251,8 @@ where
         let enroll_registry = self.registry.clone();
         let enroll_agents = self.agents.clone();
         let enroll_store = self.store.clone();
+        let enroll_paths = self.pending_paths.clone();
+        let enroll_xattr_ns = self.config.xattr_namespace;
         tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -230,7 +267,13 @@ where
                             cancel_tx: conn.cancel_tx,
                         };
                         enroll_agents.write().insert(conn.id.clone(), chans);
-                        let _drain = spawn_status_drain(conn.id, conn.status_rx, enroll_store.clone());
+                        let _drain = spawn_status_drain(
+                            conn.id,
+                            conn.status_rx,
+                            enroll_store.clone(),
+                            enroll_paths.clone(),
+                            enroll_xattr_ns,
+                        );
                         // _drain JoinHandle is intentionally not held —
                         // the per-agent status drain runs until the
                         // status_tx side closes (gRPC stream end / plugin
@@ -282,6 +325,7 @@ where
         let registry = self.registry.clone();
         let agents = self.agents.clone();
         let store_for_tick = self.store.clone();
+        let pending_paths = self.pending_paths.clone();
         let cfg = self.config.clone();
         tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(cfg.tick_interval);
@@ -296,7 +340,14 @@ where
                         let assignments = scheduler.pick_ready(&registry, cfg.max_per_tick);
                         if assignments.is_empty() { continue; }
                         for assignment in assignments {
-                            dispatch_one(&store_for_tick, &agents, &cfg.mountpoint, assignment).await;
+                            dispatch_one(
+                                &store_for_tick,
+                                &agents,
+                                &cfg.mountpoint,
+                                cfg.xattr_namespace,
+                                &pending_paths,
+                                assignment,
+                            ).await;
                         }
                     }
                 }
@@ -317,6 +368,8 @@ async fn dispatch_one<Store: ActionStore>(
     store: &Arc<Store>,
     agents: &Arc<RwLock<HashMap<AgentId, AgentChannels>>>,
     mount: &PathBuf,
+    xattr_ns: Option<XattrNamespace>,
+    pending_paths: &PendingPaths,
     Assignment { action, agent }: Assignment,
 ) {
     let cookie = action.cookie;
@@ -326,6 +379,41 @@ async fn dispatch_one<Store: ActionStore>(
             warn!(target: "hsmd.tick", %agent, %cookie, "agent missing at dispatch time; dropping");
             return;
         }
+    };
+
+    // M2d.1 stub: primary_path = `<mountpoint>/__fid__<fid_display>`.
+    // M2d.2c will plug in the lustre-llapi fid-to-path helper.
+    let primary_path = mount.join(format!("__fid__{}", action.fid));
+
+    // For Restore / Remove: read the per-file BackendObject from
+    // xattrs *before* claiming Started, so a missing-xattr action
+    // fails fast with ENODATA without flipping store state. Skipped
+    // entirely when xattr persistence is disabled (in-process tests).
+    let existing = match (action.kind, xattr_ns) {
+        (ActionKind::Restore | ActionKind::Remove, Some(ns)) => {
+            match xattr_store::read_obj(&primary_path, ns) {
+                Ok(Some(obj)) => Some(obj),
+                Ok(None) => {
+                    warn!(
+                        target: "hsmd.tick", %cookie, kind = ?action.kind,
+                        path = %primary_path.display(),
+                        "no lhsm_* xattrs (file never archived); failing with ENODATA"
+                    );
+                    handle_terminal(store, cookie, ArState::Failed { rc: ENODATA }).await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        target: "hsmd.tick", %cookie, kind = ?action.kind,
+                        path = %primary_path.display(), error = %e,
+                        "xattr read failed; failing with EIO"
+                    );
+                    handle_terminal(store, cookie, ArState::Failed { rc: 5 }).await;
+                    return;
+                }
+            }
+        }
+        _ => None,
     };
 
     // Mark Started in the store BEFORE pushing to the agent so a crash
@@ -346,13 +434,17 @@ async fn dispatch_one<Store: ActionStore>(
         return;
     }
 
+    // For Restore: write_path = primary_path (file:// dev mode; on
+    // real Lustre this would be a dfid-opened path).
+    let write_path = matches!(action.kind, ActionKind::Restore).then(|| primary_path.clone());
+
+    pending_paths.insert(cookie, primary_path.clone());
+
     let dispatched = DispatchedAction {
         action: action.clone(),
-        // M2d.1: stub path resolution. M2d.2 will plug in the
-        // FID-to-path helper from lustre-llapi.
-        primary_path: mount.join(format!("__fid__{}", action.fid)),
-        write_path: None,
-        existing: None, // Restore/Remove existing-object lookup lands in M2d.2 (xattr read).
+        primary_path,
+        write_path,
+        existing,
     };
 
     if let Err(e) = agent_chan.action_tx.send(dispatched).await {
@@ -361,14 +453,22 @@ async fn dispatch_one<Store: ActionStore>(
         if let Err(e) = store.transition(cookie, ArState::Waiting).await {
             warn!(target: "hsmd.tick", %cookie, error = %e, "rollback to Waiting failed");
         }
+        // Drop the pending path so we don't leak; a future re-dispatch
+        // will re-insert it.
+        pending_paths.remove(&cookie);
     }
 }
 
-/// Spawn a long-running task draining one agent's `status_rx`.
+/// Spawn a long-running task draining one agent's `status_rx`. On a
+/// successful Archive completion that came back with a `BackendObject`,
+/// this task also persists the object into the file's xattrs so a
+/// later Restore / Remove can find it.
 fn spawn_status_drain<Store: ActionStore + 'static>(
     agent: AgentId,
     mut status_rx: mpsc::Receiver<ActionStatus>,
     store: Arc<Store>,
+    pending_paths: PendingPaths,
+    xattr_ns: Option<XattrNamespace>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         info!(target: "hsmd.status", %agent, "status drain task started");
@@ -387,14 +487,42 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
                     }
                 }
                 ActionStatus::Completed { cookie, total_bytes, result } => {
-                    debug!(target: "hsmd.status", %cookie, total_bytes, has_obj = result.is_some(), "completed");
+                    debug!(
+                        target: "hsmd.status", %cookie, total_bytes,
+                        has_obj = result.is_some(), "completed"
+                    );
+                    // Persist BackendObject to xattrs on Archive
+                    // success. We do this BEFORE flipping the store to
+                    // Succeed so a daemon crash between the two leaves
+                    // either (a) a still-Started action that retries
+                    // (and the plugin's archive is idempotent on the
+                    // backend object name) or (b) a clean Succeed with
+                    // xattrs in place.
+                    if let (Some(obj), Some(ns)) = (result.as_ref(), xattr_ns) {
+                        if let Some(path) = pending_paths.get(&cookie).map(|e| e.value().clone()) {
+                            if let Err(e) = xattr_store::write_obj(&path, ns, obj) {
+                                warn!(
+                                    target: "hsmd.status", %cookie,
+                                    path = %path.display(), error = %e,
+                                    "xattr write failed; treating action as failed"
+                                );
+                                pending_paths.remove(&cookie);
+                                handle_terminal(&store, cookie, ArState::Failed { rc: 5 }).await;
+                                continue;
+                            }
+                        } else {
+                            warn!(
+                                target: "hsmd.status", %cookie,
+                                "no pending_paths entry for completed Archive; skipping xattr write"
+                            );
+                        }
+                    }
+                    pending_paths.remove(&cookie);
                     handle_terminal(&store, cookie, ArState::Succeed { rc: 0 }).await;
-                    // M2d.2 will:
-                    //   - Persist `result` into trusted.lhsm_uuid / hash / url xattrs.
-                    //   - Call HsmActionHandle::end(cookie, extent, EndStatus::Ok).
                 }
                 ActionStatus::Failed { cookie, errno, reason } => {
                     warn!(target: "hsmd.status", %cookie, errno, %reason, "failed");
+                    pending_paths.remove(&cookie);
                     handle_terminal(&store, cookie, ArState::Failed { rc: errno }).await;
                 }
             }

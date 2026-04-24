@@ -33,15 +33,18 @@
 //!   self-contained so a future Restore / Remove can act without
 //!   re-reading config.
 //!
-//! ## Known M2e limitations (unblocked in M3 / M3.5)
+//! ## Known M2e limitations
 //!
 //! - Whole-file in-memory: `read_file_from` returns `Bytes`. Acceptable
-//!   for M2e (small files, dev environment); M3.5 chunked-streaming PR
-//!   in terrasync-rs unlocks gigabyte-scale files.
+//!   for M2e (small files, dev environment).
 //! - Cancel granularity: token is checked **before** read and **before**
-//!   write but mid-IO is not interruptible until the streaming API
-//!   lands. ECANCELED is still surfaced cleanly when the daemon trips
-//!   the token between phases.
+//!   write but mid-IO is not interruptible. terrasync's
+//!   `copy_file_with_cancel` is merged (good for symmetric copies) but
+//!   it requires `entry.relative_path` to be the same on source and
+//!   destination — HSM stores at `<archive_root>/<archive_id>/<fid>`,
+//!   which never matches the source's Lustre path. Follow-up upstream
+//!   work: a cancel-aware `read_file_from` / `write_file_from_bytes`
+//!   pair (or `copy_file_with_remap(src_path, dst_path, …)`).
 //! - No QoS / no integrity-check piggyback through terrasync: we hash
 //!   the in-memory `Bytes` ourselves with `blake3` so the implementation
 //!   is identical to whatever terrasync's `HashCalculator` would

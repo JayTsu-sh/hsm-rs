@@ -37,6 +37,7 @@ pub mod daemon;
 pub mod error;
 pub mod grpc;
 pub mod inproc;
+pub mod xattr_store;
 
 pub use agent::{AgentConn, AgentSink, DispatchedAction};
 pub use copytool_recv::{MockRecvSource, RecvSource};

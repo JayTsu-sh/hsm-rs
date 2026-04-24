@@ -46,6 +46,41 @@ pub struct HsmdConfig {
     /// Logging block.
     #[serde(default)]
     pub log: LogCfg,
+
+    /// xattr namespace for daemon-managed `lhsm_*` attrs. Defaults to
+    /// `trusted` (production Lustre); set to `user` for unprivileged
+    /// dev / CI runs on ext4 / xfs / tmpfs.
+    #[serde(default)]
+    pub xattr: XattrCfg,
+}
+
+/// xattr namespace selector — wraps [`crate::xattr_store::XattrNamespace`].
+#[derive(Copy, Clone, Debug, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum XattrNs {
+    /// `trusted.lhsm_*` (production Lustre, requires `CAP_SYS_ADMIN`).
+    #[default]
+    Trusted,
+    /// `user.lhsm_*` (dev / CI without root).
+    User,
+}
+
+impl From<XattrNs> for crate::xattr_store::XattrNamespace {
+    fn from(value: XattrNs) -> Self {
+        match value {
+            XattrNs::Trusted => crate::xattr_store::XattrNamespace::Trusted,
+            XattrNs::User => crate::xattr_store::XattrNamespace::User,
+        }
+    }
+}
+
+/// Top-level config block grouping xattr knobs.
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct XattrCfg {
+    /// Namespace for daemon-managed xattrs.
+    #[serde(default)]
+    pub namespace: XattrNs,
 }
 
 /// Recv source mode.
@@ -199,6 +234,7 @@ impl HsmdConfig {
             tick_interval: Duration::from_millis(self.scheduler.tick_interval_ms),
             max_per_tick: self.scheduler.max_per_tick,
             mountpoint: self.mountpoint.clone(),
+            xattr_namespace: Some(self.xattr.namespace.into()),
         }
     }
 }

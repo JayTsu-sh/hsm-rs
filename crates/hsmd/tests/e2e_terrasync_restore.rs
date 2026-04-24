@@ -1,22 +1,25 @@
-//! M2e subprocess e2e: real `hsmd` + real `hsm-plugin-terrasync` move
-//! actual bytes from a "lustre" tempdir to an "archive" tempdir.
+//! M2f subprocess e2e: full archive → release-stub → restore round-trip
+//! through the terrasync plugin.
 //!
 //! Pipeline:
-//!   1. Build (idempotently) both bins.
-//!   2. Spawn `hsmd` with mode = mock + a JSONL `mock_actions_file`,
-//!      mountpoint = lustre tempdir.
-//!   3. Pre-create `<lustre>/__fid__[<fid>]` with deterministic
-//!      content. (The daemon's M2d primary_path stub is
-//!      `<mount>/__fid__<fid_display>` which we shadow with the
-//!      same naming convention.)
-//!   4. Spawn `hsm-plugin-terrasync` pointing at the same UDS, with
-//!      archive_root = backend tempdir.
-//!   5. Append an archive action to the JSONL.
-//!   6. Poll daemon stderr until `hsmd.status … completed` for the
-//!      cookie shows up.
-//!   7. Assert `<backend>/1/<fid>` exists and matches the source
-//!      bytes.
-//!   8. SIGTERM both — assert both exit 0.
+//!   1. Spawn `hsmd` (xattr.namespace = user) + `hsm-plugin-terrasync`.
+//!   2. Pre-create `<lustre>/__fid__[<fid>]` with deterministic
+//!      content.
+//!   3. Inject an Archive action; wait for completion → daemon
+//!      writes `user.lhsm_*` xattrs.
+//!   4. Truncate the lustre file (mock the kernel "release" step
+//!      where the file body goes away but the inode + xattrs stay).
+//!   5. Inject a Restore action; wait for completion → daemon reads
+//!      the xattrs, dispatches with `existing`, plugin restores via
+//!      backend object.
+//!   6. Assert lustre file body matches the original.
+//!   7. Inject a Remove action; wait for completion → backend object
+//!      gone.
+//!
+//! Closes the M2 milestone gate for file://: a single plugin
+//! end-to-end through archive / restore / remove driven entirely by
+//! the daemon's own xattr round-trip (no test scaffolding writes to
+//! `obj.url` directly).
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -26,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// ---------- helpers ---------------------------------------------------------
+// ---------- helpers (mirror of e2e_terrasync_subprocess) -------------------
 
 fn workspace_target_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -178,11 +181,11 @@ mod libc {
 // ---------- the test --------------------------------------------------------
 
 #[test]
-fn subprocess_archive_moves_bytes_via_terrasync() {
+fn subprocess_archive_release_restore_remove_round_trip() {
     let hsmd_bin = ensure_built("hsmd");
     let plugin_bin = ensure_built("hsm-plugin-terrasync");
 
-    let tmp = temp_dir("terra-archive");
+    let tmp = temp_dir("terra-restore");
     let lustre = tmp.join("lustre");
     let backend = tmp.join("backend");
     let socket_path = tmp.join("agent.sock");
@@ -194,15 +197,12 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
     std::fs::create_dir_all(&backend).unwrap();
     std::fs::write(&actions_path, "").unwrap();
 
-    // Pre-create the "lustre" file the daemon will resolve to. The
-    // daemon's M2d primary_path stub is `<mount>/__fid__<fid_display>`
-    // — we mirror that naming exactly.
     let fid_seq: u64 = 0x200000401;
-    let fid_oid: u32 = 0x12;
+    let fid_oid: u32 = 0xa5;
     let fid_ver: u32 = 0;
     let fid_display = format!("[{fid_seq:#x}:{fid_oid:#x}:{fid_ver:#x}]");
     let primary_path = lustre.join(format!("__fid__{fid_display}"));
-    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<u8> = (0..8192u32).map(|i| ((i * 7 + 3) % 251) as u8).collect();
     std::fs::write(&primary_path, &payload).unwrap();
 
     std::fs::write(
@@ -238,7 +238,7 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
         format!(
             r#"
                 socket_path = "{socket}"
-                agent_id = "terra-subproc-1"
+                agent_id = "terra-rt-1"
                 archive_ids = [1]
                 archive_root = "{backend}"
                 log_filter = "info,hsm.plugin.terrasync=debug"
@@ -249,7 +249,7 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
     )
     .unwrap();
 
-    // --- spawn hsmd ---------------------------------------------------------
+    // --- spawn hsmd + plugin ----------------------------------------------
     let hsmd = Command::new(&hsmd_bin)
         .args(["--config", hsmd_cfg.to_str().unwrap()])
         .stdout(Stdio::null())
@@ -260,11 +260,9 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
 
     assert!(
         poll_until(Duration::from_secs(5), || socket_path.exists()),
-        "hsmd never bound socket; logs:\n{}",
-        hsmd.snapshot_log().join("\n"),
+        "hsmd never bound socket"
     );
 
-    // --- spawn plugin -------------------------------------------------------
     let plugin = Command::new(&plugin_bin)
         .args(["--config", plug_cfg.to_str().unwrap()])
         .stdout(Stdio::null())
@@ -280,61 +278,110 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
                 .iter()
                 .any(|l| strip_ansi(l).contains("registered with daemon"))
         }),
-        "plugin never registered; plugin logs:\n{}\nhsmd logs:\n{}",
-        plugin.snapshot_log().join("\n"),
-        hsmd.snapshot_log().join("\n"),
+        "plugin never registered"
     );
 
-    // --- inject archive action ---------------------------------------------
-    let cookie = 555u64;
-    let mut f = OpenOptions::new()
-        .append(true)
-        .open(&actions_path)
-        .expect("open actions file");
-    let line = format!(
-        r#"{{"cookie":{cookie},"fid_seq":{fid_seq},"fid_oid":{fid_oid},"fid_ver":{fid_ver},"archive_id":1,"kind":"archive","length":{len}}}"#,
-        len = payload.len()
-    );
-    writeln!(f, "{line}").unwrap();
-    drop(f);
+    let append_action = |cookie: u64, kind: &str| {
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&actions_path)
+            .expect("open actions file");
+        let line = format!(
+            r#"{{"cookie":{cookie},"fid_seq":{fid_seq},"fid_oid":{fid_oid},"fid_ver":{fid_ver},"archive_id":1,"kind":"{kind}","length":{len}}}"#,
+            len = payload.len()
+        );
+        writeln!(f, "{line}").unwrap();
+    };
 
-    // --- wait for completion -----------------------------------------------
-    let cookie_marker = format!("cookie={cookie:#x}");
+    let wait_completed = |hsmd_log: &ChildGuard, cookie: u64, label: &str| {
+        let marker = format!("cookie={cookie:#x}");
+        assert!(
+            poll_until(Duration::from_secs(15), || {
+                hsmd_log
+                    .snapshot_log()
+                    .iter()
+                    .map(|l| strip_ansi(l))
+                    .any(|l| l.contains("hsmd.status") && l.contains("completed") && l.contains(&marker))
+            }),
+            "{label}: no completion log for cookie {cookie:#x}; hsmd:\n{}\nplugin:\n{}",
+            hsmd_log.snapshot_log().join("\n"),
+            plugin.snapshot_log().join("\n"),
+        );
+    };
+
+    // --- 1) Archive --------------------------------------------------------
+    append_action(0x501, "archive");
+    wait_completed(&hsmd, 0x501, "archive");
+    let backend_path = backend
+        .join("1")
+        .join(format!("{fid_seq:#x}:{fid_oid:#x}:{fid_ver:#x}"));
+    assert!(backend_path.exists(), "archived object missing");
+    assert_eq!(std::fs::read(&backend_path).unwrap(), payload);
+
+    // The daemon should have stamped user.lhsm_* xattrs on the
+    // primary file; verify directly so the rest of the test isn't
+    // depending on opaque success markers.
+    assert!(
+        xattr::get(&primary_path, "user.lhsm_uuid")
+            .expect("xattr get")
+            .is_some(),
+        "daemon did not write user.lhsm_uuid xattr"
+    );
+
+    // --- 2) "Release" the lustre file body --------------------------------
+    // Real Lustre: kernel truncates the file but keeps the inode +
+    // xattrs. We mimic by truncating to 0 bytes (xattrs stay).
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&primary_path)
+        .expect("truncate primary");
+    assert_eq!(std::fs::metadata(&primary_path).unwrap().len(), 0);
+    // Sanity: xattr survives truncate.
+    assert!(
+        xattr::get(&primary_path, "user.lhsm_uuid")
+            .unwrap()
+            .is_some(),
+        "xattr lost on truncate"
+    );
+
+    // --- 3) Restore --------------------------------------------------------
+    append_action(0x502, "restore");
+    wait_completed(&hsmd, 0x502, "restore");
+    let restored = std::fs::read(&primary_path).unwrap();
+    assert_eq!(restored, payload, "restored bytes != original payload");
+
+    // --- 4) Remove --------------------------------------------------------
+    append_action(0x503, "remove");
+    wait_completed(&hsmd, 0x503, "remove");
+    assert!(
+        !backend_path.exists(),
+        "backend object still present after remove: {}",
+        backend_path.display()
+    );
+
+    // --- 5) Restore on already-removed backend should fail ----------------
+    // Daemon's xattrs still claim the object exists; the plugin
+    // returns ENOENT (mapped from StorageError::IoError) and the
+    // action lands in Failed{rc=2}.
+    append_action(0x504, "restore");
+    let marker = "cookie=0x504";
     assert!(
         poll_until(Duration::from_secs(15), || {
             hsmd.snapshot_log()
                 .iter()
                 .map(|l| strip_ansi(l))
-                .any(|l| l.contains("hsmd.status") && l.contains("completed") && l.contains(&cookie_marker))
+                .any(|l| l.contains("hsmd.status") && l.contains("failed") && l.contains(marker))
         }),
-        "no completion log for cookie {cookie} ({cookie_marker}); hsmd logs:\n{}\nplugin logs:\n{}",
+        "no failed log for restore-after-remove cookie 0x504; hsmd:\n{}",
         hsmd.snapshot_log().join("\n"),
-        plugin.snapshot_log().join("\n"),
     );
-
-    // --- assert backend object content ------------------------------------
-    let fid_uuid = format!("{fid_seq:#x}:{fid_oid:#x}:{fid_ver:#x}");
-    let backend_path = backend.join("1").join(&fid_uuid);
-    assert!(
-        backend_path.exists(),
-        "backend object missing at {}; hsmd logs:\n{}\nplugin logs:\n{}",
-        backend_path.display(),
-        hsmd.snapshot_log().join("\n"),
-        plugin.snapshot_log().join("\n"),
-    );
-    let bytes = std::fs::read(&backend_path).expect("read backend object");
-    assert_eq!(bytes, payload, "backend bytes != source bytes");
 
     // --- shutdown ----------------------------------------------------------
     let plug_status = plugin.shutdown(Duration::from_secs(5));
     assert!(plug_status.success(), "plugin exit {plug_status:?}");
     let hsmd_status = hsmd.shutdown(Duration::from_secs(5));
     assert!(hsmd_status.success(), "hsmd exit {hsmd_status:?}");
-    assert!(
-        !socket_path.exists(),
-        "hsmd left socket behind at {}",
-        socket_path.display()
-    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -88,8 +88,10 @@ impl Mover for TerrasyncMover {
         };
         let size = src_entry.get_size();
 
-        // M2e limitation: read whole file into memory. M3.5 streaming
-        // PR will let us interleave read + write + cancel.
+        // M2e limitation: read whole file into memory. terrasync's
+        // copy_file_with_cancel is merged but requires src/dst to
+        // share the same relative_path — HSM rewrites it to
+        // <archive_id>/<fid>, so we go through Bytes for now.
         ctx.check_cancel()?;
         let bytes = StorageEnum::read_file_from(&self.src, &src_entry, size)
             .await
