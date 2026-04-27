@@ -27,7 +27,7 @@ pub mod mock;
 #[cfg(target_os = "linux")]
 pub mod live;
 
-pub use action::{ActionHandle, EndStatus, ReceivedAction};
+pub use action::{ActionHandle, EndStatus, HasCookieLifecycle, ReceivedAction};
 pub use error::{HsmError, Result};
 pub use mock::MockCopytool;
 

@@ -22,6 +22,7 @@ hsm-proto = { path = "../hsm-proto" }
 hsm-scheduler = { path = "../hsm-scheduler" }
 hsm-store = { path = "../hsm-store" }
 lustre-llapi = { path = "../lustre-llapi" }
+libc = "0.2"
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }

@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{ActionStatus, AgentConn, DispatchedAction};
-use crate::copytool_recv::RecvSource;
+use crate::copytool_recv::{ActionCompletion, RecvSource};
 use crate::error::DaemonError;
 use crate::xattr_store::{self, XattrNamespace};
 
@@ -75,6 +75,17 @@ pub struct DaemonConfig {
     ///   Used by in-process tests that don't materialize the
     ///   stub `__fid__<fid>` files on disk.
     pub xattr_namespace: Option<crate::xattr_store::XattrNamespace>,
+
+    /// When `true`, `dispatch_one` resolves FIDs using the Lustre
+    /// virtual `.lustre/fid/<fid>` path (live mode). When `false`,
+    /// it uses the `__fid__<fid>` stub convention used by mock tests.
+    pub use_lustre_fid_path: bool,
+
+    /// Optional sender for Lustre-side action completion.
+    /// When `Some`, `handle_terminal` sends an [`ActionCompletion`] which
+    /// causes the `LiveRecvSource` thread to call `llapi_hsm_action_end`.
+    /// `None` for mock / in-process tests where no Lustre kernel is present.
+    pub completion_tx: Option<crate::copytool_recv::CompletionTx>,
 }
 
 impl Default for DaemonConfig {
@@ -88,6 +99,8 @@ impl Default for DaemonConfig {
             // production binary's TOML config flips this to
             // `Some(Trusted)`.
             xattr_namespace: None,
+            use_lustre_fid_path: false,
+            completion_tx: None,
         }
     }
 }
@@ -232,6 +245,7 @@ where
             self.store.clone(),
             self.pending_paths.clone(),
             self.config.xattr_namespace,
+            self.config.completion_tx.clone(),
         )
     }
 
@@ -253,6 +267,7 @@ where
         let enroll_store = self.store.clone();
         let enroll_paths = self.pending_paths.clone();
         let enroll_xattr_ns = self.config.xattr_namespace;
+        let enroll_completion_tx = self.config.completion_tx.clone();
         tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -273,6 +288,7 @@ where
                             enroll_store.clone(),
                             enroll_paths.clone(),
                             enroll_xattr_ns,
+                            enroll_completion_tx.clone(),
                         );
                         // _drain JoinHandle is intentionally not held —
                         // the per-agent status drain runs until the
@@ -346,6 +362,7 @@ where
                                 &cfg.mountpoint,
                                 cfg.xattr_namespace,
                                 &pending_paths,
+                                cfg.use_lustre_fid_path,
                                 assignment,
                             ).await;
                         }
@@ -370,6 +387,7 @@ async fn dispatch_one<Store: ActionStore>(
     mount: &PathBuf,
     xattr_ns: Option<XattrNamespace>,
     pending_paths: &PendingPaths,
+    use_lustre_fid_path: bool,
     Assignment { action, agent }: Assignment,
 ) {
     let cookie = action.cookie;
@@ -381,9 +399,17 @@ async fn dispatch_one<Store: ActionStore>(
         }
     };
 
-    // M2d.1 stub: primary_path = `<mountpoint>/__fid__<fid_display>`.
-    // M2d.2c will plug in the lustre-llapi fid-to-path helper.
-    let primary_path = mount.join(format!("__fid__{}", action.fid));
+    // Build the primary path for the action's file.
+    // Live mode: use Lustre's virtual `.lustre/fid/<fid>` path (readable
+    // via normal POSIX calls; writable for restore via the dfid mechanism).
+    // Mock mode: fall back to the `__fid__<fid>` stub convention.
+    let primary_path = if use_lustre_fid_path {
+        let fid_str = format!("{}", action.fid);
+        let bare = fid_str.trim_start_matches('[').trim_end_matches(']');
+        mount.join(".lustre").join("fid").join(bare)
+    } else {
+        mount.join(format!("__fid__{}", action.fid))
+    };
 
     // For Restore / Remove: read the per-file BackendObject from
     // xattrs *before* claiming Started, so a missing-xattr action
@@ -434,8 +460,10 @@ async fn dispatch_one<Store: ActionStore>(
         return;
     }
 
-    // For Restore: write_path = primary_path (file:// dev mode; on
-    // real Lustre this would be a dfid-opened path).
+    // For Restore: write_path = primary_path.
+    // On real Lustre the HSM protocol uses hai_dfid for the data write
+    // target; since dfid == fid for most archives, the .lustre/fid path
+    // works for both read (archive) and write (restore).
     let write_path = matches!(action.kind, ActionKind::Restore).then(|| primary_path.clone());
 
     pending_paths.insert(cookie, primary_path.clone());
@@ -469,6 +497,7 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
     store: Arc<Store>,
     pending_paths: PendingPaths,
     xattr_ns: Option<XattrNamespace>,
+    completion_tx: Option<crate::copytool_recv::CompletionTx>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         info!(target: "hsmd.status", %agent, "status drain task started");
@@ -519,11 +548,27 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
                     }
                     pending_paths.remove(&cookie);
                     handle_terminal(&store, cookie, ArState::Succeed { rc: 0 }).await;
+                    // Notify the LiveRecvSource thread to call llapi_hsm_action_end(rc=0).
+                    if let Some(ref tx) = completion_tx {
+                        let _ = tx.0.try_send(ActionCompletion {
+                            cookie,
+                            status: lustre_llapi::EndStatus::Ok,
+                            total_bytes,
+                        });
+                    }
                 }
                 ActionStatus::Failed { cookie, errno, reason } => {
                     warn!(target: "hsmd.status", %cookie, errno, %reason, "failed");
                     pending_paths.remove(&cookie);
                     handle_terminal(&store, cookie, ArState::Failed { rc: errno }).await;
+                    // Notify the LiveRecvSource thread to call llapi_hsm_action_end(rc=errno).
+                    if let Some(ref tx) = completion_tx {
+                        let _ = tx.0.try_send(ActionCompletion {
+                            cookie,
+                            status: lustre_llapi::EndStatus::Failed(errno),
+                            total_bytes: 0,
+                        });
+                    }
                 }
             }
         }

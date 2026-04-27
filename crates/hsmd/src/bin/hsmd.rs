@@ -27,7 +27,7 @@ use hsm_proto::v1::data_mover_server::DataMoverServer;
 use hsm_scheduler::FifoPerKind;
 use hsm_store::MemStore;
 use hsmd::config::{HsmdConfig, LogFormat, MockAction, Mode};
-use hsmd::{Daemon, GrpcAgentService, MockRecvSource};
+use hsmd::{AnyRecvSource, Daemon, GrpcAgentService, LiveRecvSource, MockRecvSource};
 use lustre_llapi::{MockCopytool, ReceivedAction};
 use parking_lot::Mutex;
 use tokio::net::UnixListener;
@@ -111,23 +111,47 @@ async fn main() -> std::process::ExitCode {
     init_tracing(&cfg.log);
     info!(target: "hsmd", config = %args.config_path.display(), mode = ?cfg.mode, "starting");
 
-    if matches!(cfg.mode, Mode::Live) {
-        error!(
-            target: "hsmd",
-            "mode = \"live\" requires LiveCopytool integration, which lands in M2d.2c. \
-             Use mode = \"mock\" for now (set mock_actions_file to drive synthetic actions)."
-        );
-        return std::process::ExitCode::from(2);
-    }
-
-    // --- recv source (mock) -------------------------------------------------
-    let mock_ct = Arc::new(Mutex::new(MockCopytool::new()));
-    let recv = MockRecvSource::new(mock_ct.clone(), Duration::from_millis(50));
+    // --- recv source --------------------------------------------------------
+    let (recv, mock_ct): (AnyRecvSource, _) = match cfg.mode {
+        Mode::Live => {
+            if cfg.archive_ids.is_empty() {
+                error!(target: "hsmd", "mode = \"live\" requires at least one archive_id");
+                return std::process::ExitCode::from(2);
+            }
+            let archives: Vec<ArchiveId> =
+                cfg.archive_ids.iter().copied().map(ArchiveId::new).collect();
+            match LiveRecvSource::new(&cfg.mountpoint, &archives) {
+                Ok(src) => {
+                    info!(
+                        target: "hsmd",
+                        mount = %cfg.mountpoint.display(),
+                        archive_ids = ?cfg.archive_ids,
+                        "copytool registered on Lustre"
+                    );
+                    (AnyRecvSource::Live(src), None)
+                }
+                Err(e) => {
+                    error!(target: "hsmd", error = %e, "copytool registration failed");
+                    return std::process::ExitCode::from(1);
+                }
+            }
+        }
+        Mode::Mock => {
+            let ct = Arc::new(Mutex::new(MockCopytool::new()));
+            let src = MockRecvSource::new(ct.clone(), Duration::from_millis(50));
+            (AnyRecvSource::Mock(src), Some(ct))
+        }
+    };
 
     // --- daemon -------------------------------------------------------------
     let store = Arc::new(MemStore::new());
     let scheduler = Arc::new(FifoPerKind::new());
-    let daemon = Daemon::new(store, scheduler, recv, cfg.to_daemon_config());
+    let mut daemon_cfg = cfg.to_daemon_config();
+    // Wire the completion channel so llapi_hsm_action_end is called after
+    // each action completes. Only available for live mode (MockRecvSource
+    // returns None from completion_tx()).
+    daemon_cfg.completion_tx = recv.completion_tx();
+    let daemon = Daemon::new(store, scheduler, recv, daemon_cfg);
     let handle = daemon.start();
     info!(target: "hsmd", "daemon loops running");
 
@@ -169,11 +193,10 @@ async fn main() -> std::process::ExitCode {
         }
     });
 
-    // --- mock-actions file watcher (optional) -------------------------------
-    let mock_watcher_task = cfg
-        .mock_actions_file
-        .clone()
-        .map(|path| spawn_mock_watcher(path, mock_ct.clone()));
+    // --- mock-actions file watcher (mock mode only, optional) ---------------
+    let mock_watcher_task = cfg.mock_actions_file.clone().and_then(|path| {
+        mock_ct.map(|ct| spawn_mock_watcher(path, ct))
+    });
 
     // --- shutdown signal handling ------------------------------------------
     info!(target: "hsmd", "ready (Ctrl-C or SIGTERM to stop)");

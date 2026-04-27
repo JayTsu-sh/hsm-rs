@@ -160,6 +160,34 @@ impl LiveCopytool {
         self.handles.insert(action.cookie, nn);
         Ok(ActionHandle::new(self, action.cookie))
     }
+
+    /// Like [`begin`](Self::begin) but does not return an RAII `ActionHandle`.
+    /// The caller takes responsibility for calling [`HasCookieLifecycle::cookie_end`]
+    /// (or `cookie_abandon`) later — no Drop-time safety net exists.
+    ///
+    /// Used by `LiveRecvSource` to register the begin before forwarding
+    /// the action to the daemon; completion arrives asynchronously via a
+    /// separate channel, at which point `cookie_end` is called directly.
+    pub fn begin_manual(&mut self, action: &ReceivedAction) -> Result<()> {
+        let mut hai = build_hsm_action_item(action);
+        let mut phcp: *mut sys::hsm_copyaction_private = ptr::null_mut();
+        let rc = unsafe {
+            sys::llapi_hsm_action_begin(
+                &mut phcp,
+                self.raw.as_ptr(),
+                &mut hai as *mut _ as *const _,
+                -1,
+                0,
+                false,
+            )
+        };
+        if rc < 0 {
+            return Err(HsmError::Begin(-rc));
+        }
+        let nn = NonNull::new(phcp).ok_or(HsmError::Begin(22))?;
+        self.handles.insert(action.cookie, nn);
+        Ok(())
+    }
 }
 
 impl HasCookieLifecycle for LiveCopytool {

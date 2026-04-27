@@ -28,6 +28,11 @@ pub struct HsmdConfig {
     #[serde(default = "default_mountpoint")]
     pub mountpoint: PathBuf,
 
+    /// HSM archive IDs this daemon registers for (live mode only).
+    /// Must not be empty when `mode = "live"`. Defaults to `[1]`.
+    #[serde(default = "default_archive_ids")]
+    pub archive_ids: Vec<u32>,
+
     /// Optional JSONL file of actions to feed into mock mode. Each
     /// line is one [`MockAction`]; the binary polls the file every
     /// 200ms and enqueues new lines. Useful for local dev /
@@ -99,6 +104,10 @@ fn default_mode() -> Mode {
 
 fn default_mountpoint() -> PathBuf {
     PathBuf::from("/mnt/lustre")
+}
+
+fn default_archive_ids() -> Vec<u32> {
+    vec![1]
 }
 
 /// Transport configuration. UDS for local plugins; the M4
@@ -235,6 +244,8 @@ impl HsmdConfig {
             max_per_tick: self.scheduler.max_per_tick,
             mountpoint: self.mountpoint.clone(),
             xattr_namespace: Some(self.xattr.namespace.into()),
+            use_lustre_fid_path: matches!(self.mode, Mode::Live),
+            completion_tx: None, // wired by the binary after recv source construction
         }
     }
 }
