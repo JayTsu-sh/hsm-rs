@@ -12,7 +12,11 @@ fn main() {
         // Lustre only ships on Linux; emit empty bindings to keep
         // documentation builds (e.g. docs.rs on macOS) functional.
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("bindings.rs");
-        std::fs::write(&out, b"// Lustre is Linux-only; bindings are empty on this target.\n").unwrap();
+        std::fs::write(
+            &out,
+            b"// Lustre is Linux-only; bindings are empty on this target.\n",
+        )
+        .unwrap();
         return;
     }
 
@@ -71,6 +75,8 @@ fn main() {
         .allowlist_function("llapi_hsm_register_event_fifo")
         .allowlist_function("llapi_hsm_unregister_event_fifo")
         .allowlist_function("llapi_hsm_import")
+        // FID ↔ path resolution (needed for shadow namespace in TerrasyncMover).
+        .allowlist_function("llapi_fid2path")
         // Constants / vars matching ABI surface.
         .allowlist_var("HSMA_.*")
         .allowlist_var("HUA_.*")
@@ -91,5 +97,7 @@ fn main() {
         .expect("bindgen failed for Lustre HSM wrapper");
 
     let out_path = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("bindings.rs");
-    bindings.write_to_file(&out_path).expect("write bindings.rs");
+    bindings
+        .write_to_file(&out_path)
+        .expect("write bindings.rs");
 }

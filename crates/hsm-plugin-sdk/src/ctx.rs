@@ -51,6 +51,16 @@ pub struct ActionCtx {
     /// `None` on `Archive` (mover decides + reports a fresh one).
     pub existing: Option<BackendObject>,
 
+    /// Real Lustre path of the file relative to the Lustre mount root
+    /// (e.g. `"test/dir/file.txt"`). Populated for Archive actions when
+    /// the daemon successfully resolves the FID via `llapi_fid2path`.
+    /// `None` in mock mode, for non-Archive kinds, or on resolution error.
+    ///
+    /// Used by movers to write the shadow namespace entry so the archive
+    /// backend mirrors the Lustre directory structure (compatible with
+    /// `lhsmtool_posix` shadow layout).
+    pub lustre_path: Option<PathBuf>,
+
     /// Opaque per-action hint (`hai_data` from the user). Movers that
     /// route by this should validate against an allow-list — content is
     /// *attacker-controllable* in principle.
@@ -102,6 +112,7 @@ pub struct ActionCtxBuilder {
     primary_path: Option<PathBuf>,
     write_path: Option<PathBuf>,
     existing: Option<BackendObject>,
+    lustre_path: Option<PathBuf>,
     hint: Option<Bytes>,
     progress: Option<ProgressReporter>,
     cancel: Option<CancellationToken>,
@@ -148,6 +159,11 @@ impl ActionCtxBuilder {
         self.existing = Some(o);
         self
     }
+    /// Real Lustre path relative to mount root (for shadow namespace).
+    pub fn lustre_path(mut self, p: impl Into<PathBuf>) -> Self {
+        self.lustre_path = Some(p.into());
+        self
+    }
     /// Opaque hint bytes; defaults to empty.
     pub fn hint(mut self, h: impl Into<Bytes>) -> Self {
         self.hint = Some(h.into());
@@ -178,6 +194,7 @@ impl ActionCtxBuilder {
             primary_path: self.primary_path.unwrap_or_default(),
             write_path: self.write_path,
             existing: self.existing,
+            lustre_path: self.lustre_path,
             hint: self.hint.unwrap_or_default(),
             progress: self.progress.expect("progress reporter required"),
             cancel: self.cancel.unwrap_or_default(),

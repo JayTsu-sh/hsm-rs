@@ -22,7 +22,7 @@ use hsm_core::{ActionKind, ArchiveId, BackendObject, Cookie, Extent, Fid};
 use hsm_proto::v1 as pb;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, error, info, warn};
 
@@ -168,7 +168,13 @@ pub async fn run_with_channel<M: Mover>(
                 continue;
             }
         };
-        handle_action_item(item, mover.clone(), out_tx.clone(), cancels.clone(), config.progress);
+        handle_action_item(
+            item,
+            mover.clone(),
+            out_tx.clone(),
+            cancels.clone(),
+            config.progress,
+        );
     }
 
     info!(target: "hsm.sdk.run", agent = %config.agent_id, "stream closed; exiting");
@@ -227,7 +233,9 @@ fn handle_action_item<M: Mover>(
                 result: None,
             };
             let _ = forwarder_out
-                .send(pb::FromPlugin { body: Some(pb::from_plugin::Body::Status(status)) })
+                .send(pb::FromPlugin {
+                    body: Some(pb::from_plugin::Body::Status(status)),
+                })
                 .await;
         }
     });
@@ -282,7 +290,9 @@ fn handle_action_item<M: Mover>(
         cancels.lock().remove(&cookie);
 
         if out_tx
-            .send(pb::FromPlugin { body: Some(pb::from_plugin::Body::Status(terminal)) })
+            .send(pb::FromPlugin {
+                body: Some(pb::from_plugin::Body::Status(terminal)),
+            })
             .await
             .is_err()
         {
@@ -326,6 +336,9 @@ fn build_ctx_from_proto(
         .cancel(cancel);
     if !item.write_path.is_empty() {
         b = b.write_path(PathBuf::from(&item.write_path));
+    }
+    if !item.lustre_path.is_empty() {
+        b = b.lustre_path(PathBuf::from(&item.lustre_path));
     }
     if let Some(obj) = &item.existing {
         b = b.existing(BackendObject {

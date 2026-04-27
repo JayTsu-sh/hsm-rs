@@ -19,7 +19,8 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::RawFd;
-use std::os::raw::{c_char, c_int};
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_longlong};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 
@@ -216,6 +217,38 @@ impl LiveCopytool {
         } else {
             Ok(fd)
         }
+    }
+
+    /// Resolve a Lustre FID to its filesystem path relative to the mount root.
+    ///
+    /// Returns the first hard-link path found for the FID. Used by `dispatch_one`
+    /// to populate `lustre_path` in the dispatched action (shadow namespace).
+    pub fn fid_to_path(mount: &Path, fid_str: &str) -> Result<PathBuf> {
+        let c_mount =
+            CString::new(mount.as_os_str().as_encoded_bytes()).map_err(|_| HsmError::Recv(22))?;
+        let c_fid = CString::new(fid_str).map_err(|_| HsmError::Recv(22))?;
+        // PATH_MAX = 4096 is a safe upper bound.
+        let mut buf = vec![0u8; 4096];
+        let mut recno: c_longlong = 0;
+        let mut linkno: c_int = 0;
+        // SAFETY: all pointers are valid for the duration of the call.
+        let rc = unsafe {
+            sys::llapi_fid2path(
+                c_mount.as_ptr(),
+                c_fid.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as c_int,
+                &mut recno,
+                &mut linkno,
+            )
+        };
+        if rc < 0 {
+            return Err(HsmError::Recv(-rc));
+        }
+        // llapi_fid2path writes a NUL-terminated path relative to the mount.
+        let cstr = CStr::from_bytes_until_nul(&buf).map_err(|_| HsmError::Recv(22))?;
+        let s = cstr.to_str().map_err(|_| HsmError::Recv(22))?;
+        Ok(PathBuf::from(s))
     }
 }
 

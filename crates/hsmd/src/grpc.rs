@@ -25,7 +25,7 @@ use std::sync::Arc;
 use hsm_core::{ActionKind, AgentId, ArchiveId, BackendObject, Cookie};
 use hsm_proto::v1 as pb;
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
@@ -42,8 +42,7 @@ const OUTBOUND_BUFFER: usize = 128;
 /// Receives the freshly-built [`AgentConn`] so the daemon can register
 /// it with its scheduler / status drain. Returning `Err` causes the
 /// gRPC service to reject the connection with `Status::failed_precondition`.
-pub type AgentRegistrar =
-    Arc<dyn Fn(AgentConn) -> Result<(), String> + Send + Sync + 'static>;
+pub type AgentRegistrar = Arc<dyn Fn(AgentConn) -> Result<(), String> + Send + Sync + 'static>;
 
 /// gRPC service implementing [`hsm_proto::v1::data_mover_server::DataMover`].
 ///
@@ -75,7 +74,9 @@ impl pb::data_mover_server::DataMover for GrpcAgentService {
         request: Request<Streaming<pb::FromPlugin>>,
     ) -> Result<Response<Self::OpenStream>, Status> {
         let mut inbound = request.into_inner();
-        let session_id = self.next_session.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let session_id = self
+            .next_session
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         debug!(target: "hsmd.grpc", %session_id, "session opening");
 
         // First message must be Hello.
@@ -122,7 +123,9 @@ impl pb::data_mover_server::DataMover for GrpcAgentService {
         let session_str = format!("session-{session_id}");
         if out_tx
             .send(Ok(pb::ToPlugin {
-                body: Some(pb::to_plugin::Body::Welcome(pb::Welcome { session_id: session_str })),
+                body: Some(pb::to_plugin::Body::Welcome(pb::Welcome {
+                    session_id: session_str,
+                })),
             }))
             .await
             .is_err()
@@ -252,7 +255,10 @@ fn dispatched_to_proto(d: DispatchedAction) -> pb::ActionItem {
         archive_id: d.action.archive_id.get(),
         kind,
         primary_path: d.primary_path.to_string_lossy().into_owned(),
-        write_path: d.write_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        write_path: d
+            .write_path
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         offset: d.action.extent.offset,
         length: d.action.extent.length,
         data: d.action.data.to_vec(),
@@ -260,6 +266,10 @@ fn dispatched_to_proto(d: DispatchedAction) -> pb::ActionItem {
         fid_seq: d.action.fid.seq,
         fid_oid: d.action.fid.oid,
         fid_ver: d.action.fid.ver,
+        lustre_path: d
+            .lustre_path
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -326,6 +336,7 @@ mod tests {
             primary_path: "/mnt/lustre/x".into(),
             write_path: Some("/mnt/lustre/y".into()),
             existing: None,
+            lustre_path: None,
         }
     }
 
@@ -351,7 +362,10 @@ mod tests {
             result: None,
         };
         match super::proto_to_status(progress) {
-            ActionStatus::Progress { cookie, bytes_advanced } => {
+            ActionStatus::Progress {
+                cookie,
+                bytes_advanced,
+            } => {
                 assert_eq!(cookie, Cookie::new(1));
                 assert_eq!(bytes_advanced, 100);
             }
@@ -370,7 +384,11 @@ mod tests {
             }),
         };
         match super::proto_to_status(succeeded) {
-            ActionStatus::Completed { cookie, total_bytes, result } => {
+            ActionStatus::Completed {
+                cookie,
+                total_bytes,
+                result,
+            } => {
                 assert_eq!(cookie, Cookie::new(2));
                 assert_eq!(total_bytes, 4096);
                 let obj = result.unwrap();

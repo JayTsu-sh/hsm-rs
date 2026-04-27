@@ -489,11 +489,30 @@ async fn dispatch_one<Store: ActionStore>(
 
     pending_paths.insert(cookie, (primary_path.clone(), action.kind));
 
+    // For Archive actions in live Lustre mode, resolve the real path via
+    // llapi_fid2path for the shadow namespace. Other action kinds don't need
+    // this (Restore/Remove use the stored uuid from xattrs, not the path).
+    // For Archive: needed to write the shadow namespace entry.
+    // For Remove: needed to also remove the shadow entry when deleting the backend copy.
+    let lustre_path = if matches!(action.kind, ActionKind::Archive | ActionKind::Remove) && use_lustre_fid_path {
+        let fid_str = format!("{:#x}:{:#x}:{:#x}", action.fid.seq, action.fid.oid, action.fid.ver);
+        let mount_clone = mount.clone();
+        tokio::task::spawn_blocking(move || {
+            lustre_llapi::LiveCopytool::fid_to_path(&mount_clone, &fid_str)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+    } else {
+        None
+    };
+
     let dispatched = DispatchedAction {
         action: action.clone(),
         primary_path,
         write_path,
         existing,
+        lustre_path,
     };
 
     if let Err(e) = agent_chan.action_tx.send(dispatched).await {

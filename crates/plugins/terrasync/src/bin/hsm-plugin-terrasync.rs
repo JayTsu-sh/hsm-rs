@@ -5,11 +5,20 @@
 //! SIGINT/SIGTERM arrives.
 //!
 //! Config (TOML):
-//!   socket_path     = "/var/run/hsmd/agent.sock"
-//!   agent_id        = "terrasync-1"
-//!   archive_ids     = [1]
-//!   archive_root    = "/var/hsm-archive"   # absolute filesystem path
-//!   log_filter      = "info"               # optional
+//!   socket_path       = "/var/run/hsmd/agent.sock"
+//!   agent_id          = "terrasync-1"
+//!   archive_ids       = [1]
+//!   archive_root_url  = "file:///var/hsm-archive"            # file backend
+//!   # archive_root_url = "s3+https://ak:sk@bucket.host:port" # S3 backend
+//!   log_filter        = "info"   # optional
+//!
+//! S3 URL format (compatible with storage_v2):
+//!   s3+https://ACCESS_KEY:SECRET_KEY@BUCKET.HOST:PORT
+//!   s3+http://ACCESS_KEY:SECRET_KEY@BUCKET.HOST:PORT   (for plaintext, e.g. RustFS)
+//!   s3://ACCESS_KEY:SECRET_KEY@BUCKET.HOST:PORT         (defaults to HTTPS)
+//!
+//! Example for RustFS at 192.168.50.23:9090 with bucket "hsm-archive":
+//!   archive_root_url = "s3+https://minioadmin:minioadmin@hsm-archive.192.168.50.23:9090"
 //!
 //! Mirrors hsm-plugin-noop's CLI / signal / tracing plumbing —
 //! single entrypoint, no clap dependency, explicit
@@ -19,14 +28,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hsm_core::ArchiveId;
-use hsm_plugin_sdk::{run_with_channel, RunConfig};
+use hsm_plugin_sdk::{RunConfig, run_with_channel};
 use hsm_plugin_terrasync::{ArchiveLayout, BackendScheme, BackendUrl, TerrasyncMover};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
-use storage_v2::{LocalStorage, StorageEnum};
+use storage_v2::{LocalStorage, StorageEnum, create_storage};
 use thiserror::Error;
 use tokio::net::UnixStream;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tonic::transport::Endpoint;
 use tower::service_fn;
 use tracing::{error, info, warn};
@@ -164,7 +173,7 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let mover = match build_mover(&parsed) {
+    let mover = match build_mover(&cfg.archive_root_url, &parsed).await {
         Ok(m) => Arc::new(m),
         Err(e) => {
             error!(
@@ -201,7 +210,12 @@ async fn main() -> std::process::ExitCode {
     };
     info!(target: "hsm.plugin.terrasync", "connected to daemon");
 
-    let archive_ids: Vec<ArchiveId> = cfg.archive_ids.iter().copied().map(ArchiveId::new).collect();
+    let archive_ids: Vec<ArchiveId> = cfg
+        .archive_ids
+        .iter()
+        .copied()
+        .map(ArchiveId::new)
+        .collect();
     let run_cfg = RunConfig::new(cfg.agent_id.clone(), archive_ids);
     let run_task = tokio::spawn(async move { run_with_channel(channel, mover, run_cfg).await });
 
@@ -237,29 +251,56 @@ async fn main() -> std::process::ExitCode {
 /// parse cleanly upstream but fail here with a "not yet wired"
 /// message so deployments don't silently fall back to an unintended
 /// backend.
-fn build_mover(url: &BackendUrl) -> Result<TerrasyncMover, String> {
-    match url.scheme {
+/// Build a [`TerrasyncMover`] for the parsed backend URL.
+///
+/// Supported backends:
+/// - `file://<path>` — local POSIX filesystem (file:// mode)
+/// - `s3://<ak>:<sk>@<bucket>.<host>:<port>` — AWS S3 / MinIO / RustFS
+/// - `s3+https://<ak>:<sk>@<bucket>.<host>:<port>` — S3 over HTTPS (skip TLS verify)
+/// - `s3+http://<ak>:<sk>@<bucket>.<host>:<port>` — S3 over plaintext HTTP
+async fn build_mover(raw_url: &str, parsed: &BackendUrl) -> Result<TerrasyncMover, String> {
+    match parsed.scheme {
         BackendScheme::File => {
-            if !url.path.is_absolute() {
+            if !parsed.path.is_absolute() {
                 return Err(format!(
                     "file:// URL path must be absolute, got {}",
-                    url.path.display()
+                    parsed.path.display()
                 ));
             }
-            std::fs::create_dir_all(&url.path).map_err(|e| {
-                format!("create archive_root {}: {e}", url.path.display())
-            })?;
-            let layout = ArchiveLayout::new(url.path.clone());
+            std::fs::create_dir_all(&parsed.path)
+                .map_err(|e| format!("create archive_root {}: {e}", parsed.path.display()))?;
+            let layout = ArchiveLayout::new(parsed.path.clone());
             let dst = Arc::new(StorageEnum::Local(LocalStorage::new(
                 layout.root.clone(),
                 None,
             )));
             Ok(TerrasyncMover::with_dst(dst, layout))
         }
-        BackendScheme::S3 | BackendScheme::Nfs | BackendScheme::Cifs => Err(format!(
-            "scheme {:?} parsed but not yet wired in this binary; M3b will add \
-             credentials + connection config (see crates/plugins/terrasync TODO)",
-            url.scheme.as_str()
+        BackendScheme::S3 => {
+            // Delegate URL parsing + client construction to storage_v2.
+            // create_s3_storage() handles s3://, s3+http://, s3+https://,
+            // including credentials extraction and TLS configuration.
+            let storage: StorageEnum = create_storage(raw_url, None)
+                .await
+                .map_err(|e| format!("S3 storage init failed for {raw_url}: {e}"))?;
+
+            // Derive the archive root path (for ArchiveLayout) from the URL path.
+            // For `s3://ak:sk@bucket.host:port/prefix`, path is `/prefix`.
+            // If no prefix, root is just "/" relative to bucket root.
+            let archive_root = if parsed.path.as_os_str().is_empty()
+                || parsed.path == std::path::Path::new("/")
+            {
+                std::path::PathBuf::from("/")
+            } else {
+                parsed.path.clone()
+            };
+            let layout = ArchiveLayout::new(archive_root);
+            let dst = Arc::new(storage);
+            Ok(TerrasyncMover::with_dst(dst, layout))
+        }
+        BackendScheme::Nfs | BackendScheme::Cifs => Err(format!(
+            "scheme {:?} not yet implemented; use file:// or s3://",
+            parsed.scheme.as_str()
         )),
     }
 }

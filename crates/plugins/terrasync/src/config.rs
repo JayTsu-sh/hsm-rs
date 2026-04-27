@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use hsm_core::{ArchiveId, Fid};
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use thiserror::Error;
 use url::Url;
 
@@ -84,11 +84,17 @@ impl BackendScheme {
     fn parse(s: &str) -> Option<Self> {
         match s {
             "file" => Some(Self::File),
-            "s3" => Some(Self::S3),
+            // storage_v2 uses s3, s3+http, s3+https, s3+hcp — all map to S3.
+            "s3" | "s3+http" | "s3+https" | "s3+hcp" => Some(Self::S3),
             "nfs" => Some(Self::Nfs),
             "cifs" => Some(Self::Cifs),
             _ => None,
         }
+    }
+
+    /// Whether this scheme is an S3-compatible backend.
+    pub fn is_s3(self) -> bool {
+        self == BackendScheme::S3
     }
 }
 
@@ -206,6 +212,45 @@ impl ArchiveLayout {
     /// path. Returns `None` if `path` doesn't live under the root.
     pub fn relative_under(&self, path: &Path) -> Option<PathBuf> {
         path.strip_prefix(&self.root).ok().map(PathBuf::from)
+    }
+
+    // -----------------------------------------------------------------------
+    // Shadow namespace
+    // -----------------------------------------------------------------------
+
+    /// Relative path of the shadow entry for `lustre_path` within the archive.
+    ///
+    /// Shadow mirrors the Lustre namespace:
+    /// `shadow/<lustre_relative_path>`
+    ///
+    /// This matches the layout created by `lhsmtool_posix` and allows
+    /// humans (and tools like `lhsmtool_posix --import`) to browse archived
+    /// files by their original Lustre path.
+    pub fn shadow_relative(lustre_path: &Path) -> PathBuf {
+        PathBuf::from("shadow").join(lustre_path)
+    }
+
+    /// Absolute filesystem path for the shadow entry (file:// backends).
+    pub fn shadow_full_path(&self, lustre_path: &Path) -> PathBuf {
+        self.root.join(Self::shadow_relative(lustre_path))
+    }
+
+    /// Compute the symlink target for a file:// shadow entry.
+    ///
+    /// The target is a relative path from the shadow file's directory to the
+    /// actual data file, matching `lhsmtool_posix` convention:
+    /// `shadow/a/b/file.txt` → `../../../1/<fid>`
+    pub fn shadow_symlink_target(lustre_path: &Path, archive_id: ArchiveId, fid: Fid) -> PathBuf {
+        // Count components in lustre_path to know how many ".." we need.
+        // shadow/<path> is at depth (1 + path.components().count()) from root.
+        let depth = 1 + lustre_path.components().count();
+        let mut target = PathBuf::new();
+        for _ in 0..depth {
+            target.push("..");
+        }
+        target.push(archive_id.get().to_string());
+        target.push(Self::uuid_for(fid));
+        target
     }
 }
 

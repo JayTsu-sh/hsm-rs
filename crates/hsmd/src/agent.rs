@@ -31,6 +31,12 @@ pub struct DispatchedAction {
     pub write_path: Option<std::path::PathBuf>,
     /// Pre-existing backend object metadata for restore / remove.
     pub existing: Option<BackendObject>,
+    /// Real Lustre path of the file relative to the mount root
+    /// (e.g. `"test/dir/file.txt"`). Populated by the daemon for
+    /// Archive actions via `llapi_fid2path`; empty for other kinds or
+    /// when resolution fails (mock mode, no Lustre mount).
+    /// Used by the mover to write the shadow namespace entry.
+    pub lustre_path: Option<std::path::PathBuf>,
 }
 
 /// Mover-reported status for one action.
@@ -83,7 +89,10 @@ impl ActionStatus {
 
     /// `true` if this is a terminal event (Completed / Failed).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, ActionStatus::Completed { .. } | ActionStatus::Failed { .. })
+        matches!(
+            self,
+            ActionStatus::Completed { .. } | ActionStatus::Failed { .. }
+        )
     }
 }
 
@@ -199,12 +208,7 @@ mod tests {
 
     #[test]
     fn pair_wires_both_sides() {
-        let (mut conn, mut sink) = AgentSink::pair(
-            AgentId::new("m0"),
-            [ArchiveId::new(1)],
-            16,
-            16,
-        );
+        let (mut conn, mut sink) = AgentSink::pair(AgentId::new("m0"), [ArchiveId::new(1)], 16, 16);
         // Conn side -> sink side
         let action = DispatchedAction {
             action: hsm_core::Action {
@@ -220,6 +224,7 @@ mod tests {
             primary_path: std::path::PathBuf::from("/x"),
             write_path: None,
             existing: None,
+            lustre_path: None,
         };
         conn.action_tx.try_send(action.clone()).unwrap();
         let got = sink.action_rx.try_recv().unwrap();
@@ -227,7 +232,10 @@ mod tests {
 
         // Sink side -> conn side
         sink.status_tx
-            .try_send(ActionStatus::Progress { cookie: Cookie::new(1), bytes_advanced: 100 })
+            .try_send(ActionStatus::Progress {
+                cookie: Cookie::new(1),
+                bytes_advanced: 100,
+            })
             .unwrap();
         let got = conn.status_rx.try_recv().unwrap();
         assert_eq!(got.cookie(), Cookie::new(1));

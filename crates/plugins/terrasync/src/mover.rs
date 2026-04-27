@@ -59,7 +59,10 @@ impl TerrasyncMover {
     /// `archive_root` and an [`ArchiveLayout`] rooted at the same.
     pub fn new(archive_root: impl Into<PathBuf>) -> Self {
         let layout = ArchiveLayout::new(archive_root);
-        let dst = Arc::new(StorageEnum::Local(LocalStorage::new(layout.root.clone(), None)));
+        let dst = Arc::new(StorageEnum::Local(LocalStorage::new(
+            layout.root.clone(),
+            None,
+        )));
         Self::with_dst(dst, layout)
     }
 
@@ -116,6 +119,13 @@ impl Mover for TerrasyncMover {
 
         ctx.progress.flush().await;
 
+        // Shadow namespace: create an entry that mirrors the Lustre path.
+        // Compatible with `lhsmtool_posix` shadow layout so the archive can
+        // be browsed by original path (not just by FID).
+        if let Some(ref lustre_path) = ctx.lustre_path {
+            self.write_shadow(lustre_path, ctx.archive_id, ctx.fid).await;
+        }
+
         let url = self.layout.url(ctx.archive_id, ctx.fid);
         info!(
             target: "hsm.plugin.terrasync",
@@ -135,9 +145,7 @@ impl Mover for TerrasyncMover {
         let backend_relative = self
             .layout
             .relative_under(&self.layout.full_path(ctx.archive_id, ctx.fid))
-            .ok_or_else(|| {
-                MoverError::Other("backend object path escaped archive root".into())
-            })?;
+            .ok_or_else(|| MoverError::Other("backend object path escaped archive root".into()))?;
         debug!(
             target: "hsm.plugin.terrasync",
             cookie = %ctx.cookie,
@@ -145,11 +153,14 @@ impl Mover for TerrasyncMover {
             "restore: locating backend object"
         );
 
+        // Accept NAS (file://, NFS) and S3 entries — both implement get_size()
+        // and are usable with StorageEnum::read_file_from().
         let src_meta = match self.dst.get_metadata(&backend_relative).await {
-            Ok(EntryEnum::NAS(e)) => EntryEnum::NAS(e),
-            Ok(other) => {
+            Ok(e) if !e.get_is_dir() => e,
+            Ok(_) => {
                 return Err(MoverError::Other(format!(
-                    "backend object had unexpected entry type: {other:?}"
+                    "backend object {} is a directory, not a file",
+                    backend_relative.display()
                 )));
             }
             Err(e) => return Err(map_storage_err(e, &backend_relative)),
@@ -208,7 +219,6 @@ impl Mover for TerrasyncMover {
                     target: "hsm.plugin.terrasync",
                     cookie = %ctx.cookie, fid = %ctx.fid, "removed"
                 );
-                Ok(())
             }
             Err(e) => {
                 // Idempotency: missing is OK.
@@ -218,9 +228,93 @@ impl Mover for TerrasyncMover {
                         cookie = %ctx.cookie, fid = %ctx.fid,
                         "remove: backend object already gone (treating as success)"
                     );
-                    return Ok(());
+                } else {
+                    return Err(map_storage_err(e, &backend_relative));
                 }
-                Err(map_storage_err(e, &backend_relative))
+            }
+        }
+        // Also remove the shadow entry so the archive root stays consistent.
+        if let Some(ref lustre_path) = ctx.lustre_path {
+            self.remove_shadow(lustre_path).await;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shadow namespace helpers (private)
+// ---------------------------------------------------------------------------
+
+impl TerrasyncMover {
+    /// Write a shadow entry to the destination storage.
+    ///
+    /// **file:// backend**: creates a POSIX symlink under
+    /// `<archive_root>/shadow/<lustre_path>` pointing to the data object.
+    /// Compatible with `lhsmtool_posix` shadow layout.
+    ///
+    /// **Other backends (S3, NFS, CIFS)**: writes a small pointer object
+    /// at `shadow/<lustre_path>` whose content is the FID string.
+    async fn write_shadow(&self, lustre_path: &Path, archive_id: hsm_core::ArchiveId, fid: hsm_core::Fid) {
+        match &*self.dst {
+            StorageEnum::Local(_) => {
+                // file:// mode: create a symlink exactly like lhsmtool_posix.
+                let shadow = self.layout.shadow_full_path(lustre_path);
+                if let Some(parent) = shadow.parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                        warn!(
+                            target: "hsm.plugin.terrasync",
+                            path = %parent.display(), error = %e,
+                            "shadow: failed to create directory"
+                        );
+                        return;
+                    }
+                }
+                let target = ArchiveLayout::shadow_symlink_target(lustre_path, archive_id, fid);
+                // Remove stale entry first (idempotent).
+                let _ = tokio::fs::remove_file(&shadow).await;
+                if let Err(e) = tokio::fs::symlink(&target, &shadow).await {
+                    warn!(
+                        target: "hsm.plugin.terrasync",
+                        shadow = %shadow.display(), target = %target.display(), error = %e,
+                        "shadow: symlink failed"
+                    );
+                } else {
+                    debug!(
+                        target: "hsm.plugin.terrasync",
+                        shadow = %shadow.display(), target = %target.display(),
+                        "shadow: symlink created"
+                    );
+                }
+            }
+            _ => {
+                // S3/NFS/CIFS: write a tiny pointer object at shadow/<path>.
+                let shadow_key = ArchiveLayout::shadow_relative(lustre_path);
+                let content = Bytes::from(ArchiveLayout::uuid_for(fid));
+                let entry = synth_dest_entry(shadow_key, content.len() as u64);
+                if let Err(e) =
+                    StorageEnum::write_file_from_bytes(&self.dst, &entry, content).await
+                {
+                    warn!(
+                        target: "hsm.plugin.terrasync",
+                        lustre_path = %lustre_path.display(), error = %e,
+                        "shadow: write pointer object failed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Remove the shadow entry for `lustre_path`, best-effort.
+    async fn remove_shadow(&self, lustre_path: &Path) {
+        match &*self.dst {
+            StorageEnum::Local(_) => {
+                let shadow = self.layout.shadow_full_path(lustre_path);
+                let _ = tokio::fs::remove_file(&shadow).await;
+            }
+            _ => {
+                let shadow_key = ArchiveLayout::shadow_relative(lustre_path);
+                let entry = synth_dest_entry(shadow_key, 0);
+                let _ = self.dst.delete_file(&entry).await;
             }
         }
     }
@@ -273,7 +367,10 @@ fn synth_dest_entry(relative_path: PathBuf, size: u64) -> EntryEnum {
     let extension = relative_path
         .extension()
         .map(|s| s.to_string_lossy().into_owned());
-    let now_ns = UNIX_EPOCH.elapsed().map(|d| d.as_nanos() as i64).unwrap_or(0);
+    let now_ns = UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
     EntryEnum::NAS(NASEntry {
         name,
         relative_path,
@@ -344,11 +441,8 @@ mod tests {
         write: Option<PathBuf>,
         existing: Option<BackendObject>,
     ) -> ActionCtx {
-        let (progress, _rx) = ProgressReporter::new(
-            Cookie::new(cookie),
-            extent,
-            ProgressConfig::defaults(),
-        );
+        let (progress, _rx) =
+            ProgressReporter::new(Cookie::new(cookie), extent, ProgressConfig::defaults());
         let mut b = ActionCtxBuilder::default()
             .cookie(Cookie::new(cookie))
             .fid(fid)
@@ -396,9 +490,7 @@ mod tests {
         assert_eq!(obj.uuid, "0x200000401:0x12:0x0");
         assert!(obj.url.starts_with("file://"));
 
-        let backend_path = mover
-            .layout()
-            .full_path(ArchiveId::new(aid), fid);
+        let backend_path = mover.layout().full_path(ArchiveId::new(aid), fid);
         assert_eq!(tokio::fs::read(&backend_path).await.unwrap(), payload);
 
         // restore
@@ -470,7 +562,9 @@ mod tests {
 
         // Tamper the backend object on disk.
         let backend_path = mover.layout().full_path(ArchiveId::new(1), fid);
-        tokio::fs::write(&backend_path, b"GOTCHA WORLD").await.unwrap();
+        tokio::fs::write(&backend_path, b"GOTCHA WORLD")
+            .await
+            .unwrap();
 
         let err = mover
             .restore(
@@ -503,11 +597,8 @@ mod tests {
         let fid = Fid::new(2, 17, 0);
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let (progress, _rx) = ProgressReporter::new(
-            Cookie::new(20),
-            Extent::WHOLE,
-            ProgressConfig::defaults(),
-        );
+        let (progress, _rx) =
+            ProgressReporter::new(Cookie::new(20), Extent::WHOLE, ProgressConfig::defaults());
         let ctx = ActionCtxBuilder::default()
             .cookie(Cookie::new(20))
             .fid(fid)
@@ -550,11 +641,8 @@ mod tests {
 
         let mover = TerrasyncMover::new(work.path().join("backend"));
         let fid = Fid::new(2, 17, 0);
-        let (progress, mut rx) = ProgressReporter::new(
-            Cookie::new(40),
-            Extent::WHOLE,
-            ProgressConfig::defaults(),
-        );
+        let (progress, mut rx) =
+            ProgressReporter::new(Cookie::new(40), Extent::WHOLE, ProgressConfig::defaults());
         let ctx = ActionCtxBuilder::default()
             .cookie(Cookie::new(40))
             .fid(fid)

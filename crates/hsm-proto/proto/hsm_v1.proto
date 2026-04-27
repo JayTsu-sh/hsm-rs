@@ -65,6 +65,13 @@ message ActionItem {
   fixed64    fid_seq      = 10;
   fixed32    fid_oid      = 11;
   fixed32    fid_ver      = 12;
+  // Real Lustre path of the file, relative to the mount root
+  // (e.g. "test/file1.txt" for /lustre/test/file1.txt). Resolved by
+  // the daemon via llapi_fid2path for Archive actions. Empty string
+  // when unavailable (mock mode, non-Archive kinds, or resolution error).
+  // Used by the mover to build the shadow namespace entry in the
+  // destination storage.
+  string     lustre_path  = 13;
 }
 
 // Plugin → daemon status. `completed=false` is a non-terminal
