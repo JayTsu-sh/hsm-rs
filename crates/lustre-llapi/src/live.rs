@@ -60,8 +60,8 @@ impl LiveCopytool {
         if archives.is_empty() {
             return Err(HsmError::EmptyArchiveList);
         }
-        let c_mnt = CString::new(mount.as_os_str().as_encoded_bytes())
-            .map_err(|_| HsmError::Register {
+        let c_mnt =
+            CString::new(mount.as_os_str().as_encoded_bytes()).map_err(|_| HsmError::Register {
                 mount: mount.to_path_buf(),
                 errno: 22, // EINVAL
             })?;
@@ -84,14 +84,21 @@ impl LiveCopytool {
             )
         };
         if rc < 0 {
-            return Err(HsmError::Register { mount: mount.to_path_buf(), errno: -rc });
+            return Err(HsmError::Register {
+                mount: mount.to_path_buf(),
+                errno: -rc,
+            });
         }
         let nn = NonNull::new(raw).ok_or(HsmError::Register {
             mount: mount.to_path_buf(),
             errno: 22, // EINVAL: llapi returned 0 but null pointer (shouldn't happen).
         })?;
         debug!(target: "hsm.live", mount = %mount.display(), n_archives = archives.len(), "copytool registered");
-        Ok(Self { raw: nn, mount: mount.to_path_buf(), handles: HashMap::new() })
+        Ok(Self {
+            raw: nn,
+            mount: mount.to_path_buf(),
+            handles: HashMap::new(),
+        })
     }
 
     /// File descriptor the kernel writes new action lists to. Wrap in
@@ -114,9 +121,8 @@ impl LiveCopytool {
         let mut hal_ptr: *mut sys::hsm_action_list = ptr::null_mut();
         let mut msgsize: c_int = 0;
         // SAFETY: copytool handle is valid; both out-pointers are writable.
-        let rc = unsafe {
-            sys::llapi_hsm_copytool_recv(self.raw.as_ptr(), &mut hal_ptr, &mut msgsize)
-        };
+        let rc =
+            unsafe { sys::llapi_hsm_copytool_recv(self.raw.as_ptr(), &mut hal_ptr, &mut msgsize) };
         if rc < 0 {
             return Err(HsmError::Recv(-rc));
         }
@@ -188,11 +194,37 @@ impl LiveCopytool {
         self.handles.insert(action.cookie, nn);
         Ok(())
     }
+
+    /// Return the file descriptor associated with an active action handle.
+    ///
+    /// Used for Restore in live mode: after `begin_manual`, the caller reads
+    /// the archived bytes from the backend and writes them to this FD — the
+    /// kernel then materialises the OST objects without triggering a second
+    /// automatic restore cycle.
+    ///
+    /// The returned FD is owned by `phcp` inside Lustre and must **not** be
+    /// closed by the caller; it becomes invalid after `cookie_end`.
+    pub fn get_action_fd(&self, cookie: Cookie) -> Result<std::os::unix::io::RawFd> {
+        let h = *self
+            .handles
+            .get(&cookie)
+            .ok_or_else(|| HsmError::UnknownCookie(cookie.get()))?;
+        // SAFETY: `h` is a valid per-action handle stored by begin_manual/begin.
+        let fd = unsafe { sys::llapi_hsm_action_get_fd(h.as_ptr()) };
+        if fd < 0 {
+            Err(HsmError::Begin(-fd))
+        } else {
+            Ok(fd)
+        }
+    }
 }
 
 impl HasCookieLifecycle for LiveCopytool {
     fn cookie_progress(&mut self, cookie: Cookie, e: Extent) -> Result<()> {
-        let h = *self.handles.get(&cookie).ok_or_else(|| HsmError::UnknownCookie(cookie.get()))?;
+        let h = *self
+            .handles
+            .get(&cookie)
+            .ok_or_else(|| HsmError::UnknownCookie(cookie.get()))?;
         let extent = conv::extent_to_sys(e);
         // SAFETY: `h` is the per-cookie handle returned by a successful
         // `llapi_hsm_action_begin` call; still valid because `end` /
@@ -212,7 +244,10 @@ impl HasCookieLifecycle for LiveCopytool {
     }
 
     fn cookie_end(&mut self, cookie: Cookie, e: Extent, status: EndStatus) -> Result<()> {
-        let mut h = self.handles.remove(&cookie).ok_or_else(|| HsmError::UnknownCookie(cookie.get()))?;
+        let mut h = self
+            .handles
+            .remove(&cookie)
+            .ok_or_else(|| HsmError::UnknownCookie(cookie.get()))?;
         let extent = conv::extent_to_sys(e);
         let mut h_ptr = h.as_ptr();
         // SAFETY: `h_ptr` points to a valid copyaction_private; llapi frees
@@ -334,7 +369,8 @@ unsafe fn parse_action_list(
         let hai_action: u32 = unsafe { ptr::addr_of!((*hai_ptr).hai_action).read_unaligned() };
         let hai_fid: sys::lu_fid = unsafe { ptr::addr_of!((*hai_ptr).hai_fid).read_unaligned() };
         let hai_dfid: sys::lu_fid = unsafe { ptr::addr_of!((*hai_ptr).hai_dfid).read_unaligned() };
-        let hai_extent: sys::hsm_extent = unsafe { ptr::addr_of!((*hai_ptr).hai_extent).read_unaligned() };
+        let hai_extent: sys::hsm_extent =
+            unsafe { ptr::addr_of!((*hai_ptr).hai_extent).read_unaligned() };
         let hai_cookie: u64 = unsafe { ptr::addr_of!((*hai_ptr).hai_cookie).read_unaligned() };
         let hai_gid: u64 = unsafe { ptr::addr_of!((*hai_ptr).hai_gid).read_unaligned() };
 

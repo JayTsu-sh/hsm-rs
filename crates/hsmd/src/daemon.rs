@@ -45,9 +45,10 @@ const ENODATA: i32 = 61;
 
 /// In-flight `(cookie → primary_path)` map used by the dispatch loop
 /// to tell the status drain task where to write `trusted.lhsm_*`
-/// xattrs on successful Archive completion. Entries are removed on
-/// any terminal status.
-type PendingPaths = Arc<DashMap<Cookie, PathBuf>>;
+/// Metadata tracked for each in-flight action: primary path (for xattr writes
+/// on Archive) and the action kind (for building the correct extent on completion).
+/// Entries are removed on any terminal status.
+type PendingPaths = Arc<DashMap<Cookie, (PathBuf, ActionKind)>>;
 
 /// Tunables for the daemon main loop.
 #[derive(Clone, Debug)]
@@ -236,8 +237,12 @@ where
     /// matching actions against this agent's archive_ids on the next
     /// tick.
     pub fn register_agent(&self, conn: AgentConn) -> JoinHandle<()> {
-        self.registry.register(conn.id.clone(), conn.archives.iter().copied());
-        let chans = AgentChannels { action_tx: conn.action_tx, cancel_tx: conn.cancel_tx };
+        self.registry
+            .register(conn.id.clone(), conn.archives.iter().copied());
+        let chans = AgentChannels {
+            action_tx: conn.action_tx,
+            cancel_tx: conn.cancel_tx,
+        };
         self.agents.write().insert(conn.id.clone(), chans);
         spawn_status_drain(
             conn.id,
@@ -452,7 +457,10 @@ async fn dispatch_one<Store: ActionStore>(
     if let Err(e) = store
         .transition(
             cookie,
-            ArState::Started { agent: agent.clone(), since_unix_ms: now_ms },
+            ArState::Started {
+                agent: agent.clone(),
+                since_unix_ms: now_ms,
+            },
         )
         .await
     {
@@ -460,13 +468,26 @@ async fn dispatch_one<Store: ActionStore>(
         return;
     }
 
-    // For Restore: write_path = primary_path.
-    // On real Lustre the HSM protocol uses hai_dfid for the data write
-    // target; since dfid == fid for most archives, the .lustre/fid path
-    // works for both read (archive) and write (restore).
-    let write_path = matches!(action.kind, ActionKind::Restore).then(|| primary_path.clone());
+    // For Restore: determine the write_path the plugin uses to materialise
+    // the file's bytes.
+    //
+    // Live Lustre: writing directly to the `.lustre/fid/<fid>` path of a
+    // released file triggers Lustre's automatic restore, which deadlocks with
+    // our own copytool restore. Instead we use a deterministic temp path;
+    // the recv thread later copies these bytes to the Lustre action FD via
+    // `llapi_hsm_action_get_fd` before calling `llapi_hsm_action_end`.
+    //
+    // Mock mode: keep using `primary_path` (the `__fid__<fid>` stub), which
+    // is a normal file the plugin can write to directly.
+    let write_path = matches!(action.kind, ActionKind::Restore).then(|| {
+        if use_lustre_fid_path {
+            crate::copytool_recv::restore_temp_path(cookie)
+        } else {
+            primary_path.clone()
+        }
+    });
 
-    pending_paths.insert(cookie, primary_path.clone());
+    pending_paths.insert(cookie, (primary_path.clone(), action.kind));
 
     let dispatched = DispatchedAction {
         action: action.clone(),
@@ -503,7 +524,10 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
         info!(target: "hsmd.status", %agent, "status drain task started");
         while let Some(status) = status_rx.recv().await {
             match status {
-                ActionStatus::Progress { cookie, bytes_advanced } => {
+                ActionStatus::Progress {
+                    cookie,
+                    bytes_advanced,
+                } => {
                     // Convert cumulative bytes into a "progress extent"
                     // for the store. We don't know the original extent
                     // length here without a lookup; the daemon's view of
@@ -515,7 +539,11 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
                         warn!(target: "hsmd.status", %cookie, error = %err, "update_progress");
                     }
                 }
-                ActionStatus::Completed { cookie, total_bytes, result } => {
+                ActionStatus::Completed {
+                    cookie,
+                    total_bytes,
+                    result,
+                } => {
                     debug!(
                         target: "hsmd.status", %cookie, total_bytes,
                         has_obj = result.is_some(), "completed"
@@ -528,7 +556,8 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
                     // backend object name) or (b) a clean Succeed with
                     // xattrs in place.
                     if let (Some(obj), Some(ns)) = (result.as_ref(), xattr_ns) {
-                        if let Some(path) = pending_paths.get(&cookie).map(|e| e.value().clone()) {
+                        if let Some(path) = pending_paths.get(&cookie).map(|e| e.value().0.clone())
+                        {
                             if let Err(e) = xattr_store::write_obj(&path, ns, obj) {
                                 warn!(
                                     target: "hsmd.status", %cookie,
@@ -546,27 +575,51 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
                             );
                         }
                     }
-                    pending_paths.remove(&cookie);
+                    let action_kind = pending_paths.remove(&cookie).map(|(_, (_, k))| k);
                     handle_terminal(&store, cookie, ArState::Succeed { rc: 0 }).await;
                     // Notify the LiveRecvSource thread to call llapi_hsm_action_end(rc=0).
                     if let Some(ref tx) = completion_tx {
+                        let kind = action_kind.unwrap_or(ActionKind::Archive);
+                        let restore_temp_path = if matches!(kind, ActionKind::Restore) {
+                            let p = crate::copytool_recv::restore_temp_path(cookie);
+                            if p.exists() { Some(p) } else { None }
+                        } else {
+                            None
+                        };
                         let _ = tx.0.try_send(ActionCompletion {
                             cookie,
                             status: lustre_llapi::EndStatus::Ok,
                             total_bytes,
+                            kind,
+                            restore_temp_path,
                         });
                     }
                 }
-                ActionStatus::Failed { cookie, errno, reason } => {
+                ActionStatus::Failed {
+                    cookie,
+                    errno,
+                    reason,
+                } => {
                     warn!(target: "hsmd.status", %cookie, errno, %reason, "failed");
-                    pending_paths.remove(&cookie);
+                    let action_kind = pending_paths.remove(&cookie).map(|(_, (_, k))| k);
                     handle_terminal(&store, cookie, ArState::Failed { rc: errno }).await;
                     // Notify the LiveRecvSource thread to call llapi_hsm_action_end(rc=errno).
+                    // Clean up any restore temp file on failure.
                     if let Some(ref tx) = completion_tx {
+                        let kind = action_kind.unwrap_or(ActionKind::Archive);
+                        let restore_temp_path = {
+                            let p = crate::copytool_recv::restore_temp_path(cookie);
+                            if p.exists() {
+                                let _ = std::fs::remove_file(&p);
+                            }
+                            None
+                        };
                         let _ = tx.0.try_send(ActionCompletion {
                             cookie,
                             status: lustre_llapi::EndStatus::Failed(errno),
                             total_bytes: 0,
+                            kind,
+                            restore_temp_path,
                         });
                     }
                 }
