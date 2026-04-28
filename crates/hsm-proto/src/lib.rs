@@ -5,9 +5,14 @@
 //!
 //! - `data_mover_client::DataMoverClient` — plugin side.
 //! - `data_mover_server::{DataMover, DataMoverServer}` — daemon side.
+//! - `hsm_control_server::{HsmControl, HsmControlServer}` — hsmctl server.
+//! - `hsm_control_client::HsmControlClient` — hsmctl client.
 //! - Message types: `Hello`, `Welcome`, `ActionItem`, `ActionStatus`,
 //!   `BackendObject`, `FromPlugin`, `ToPlugin`, plus the oneof inner
 //!   enums `from_plugin::Body`, `to_plugin::Body`.
+//! - Management messages: `CtlStatusRequest/Response`, `CtlAgentInfo`,
+//!   `CtlListAgentsRequest/Response`, `CtlListActionsRequest/Response`,
+//!   `CtlActionRecord`.
 
 #![allow(missing_docs)] // generated code
 
@@ -18,7 +23,9 @@ pub mod v1 {
 
 #[cfg(test)]
 mod tests {
-    use super::v1::{from_plugin, to_plugin, ActionItem, ActionKind, FromPlugin, Hello, ToPlugin, Welcome};
+    use super::v1::{
+        ActionItem, ActionKind, FromPlugin, Hello, ToPlugin, Welcome, from_plugin, to_plugin,
+    };
 
     #[test]
     fn handshake_envelope_round_trips() {
@@ -42,7 +49,9 @@ mod tests {
     #[test]
     fn welcome_envelope_round_trips() {
         let welcome = ToPlugin {
-            body: Some(to_plugin::Body::Welcome(Welcome { session_id: "s-1".into() })),
+            body: Some(to_plugin::Body::Welcome(Welcome {
+                session_id: "s-1".into(),
+            })),
         };
         match welcome.body.unwrap() {
             to_plugin::Body::Welcome(w) => assert_eq!(w.session_id, "s-1"),

@@ -1,0 +1,30 @@
+[package]
+name = "hsmctl"
+description = "hsm-rs management CLI — query daemon status, list actions/agents, manage file xattrs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "hsmctl"
+path = "src/main.rs"
+
+[dependencies]
+hex       = { workspace = true }
+hsm-core  = { path = "../hsm-core" }
+hsm-proto = { path = "../hsm-proto" }
+hsmd      = { path = "../hsmd" }      # xattr_store helpers
+
+bytes    = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio    = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net"] }
+tonic    = { workspace = true }
+tower    = "0.5"
+tracing  = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

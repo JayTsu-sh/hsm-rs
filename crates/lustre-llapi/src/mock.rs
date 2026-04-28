@@ -71,7 +71,14 @@ impl MockCopytool {
 
     /// Convenience: enqueue with sensible defaults for cases tests don't
     /// care about (`fid == dfid`, `data == ""`, `gid == 0`).
-    pub fn enqueue_simple(&mut self, cookie: Cookie, fid: Fid, archive: ArchiveId, kind: ActionKind, extent: Extent) {
+    pub fn enqueue_simple(
+        &mut self,
+        cookie: Cookie,
+        fid: Fid,
+        archive: ArchiveId,
+        kind: ActionKind,
+        extent: Extent,
+    ) {
         self.enqueue(ReceivedAction {
             cookie,
             fid,
@@ -100,7 +107,12 @@ impl MockCopytool {
         if self.in_flight.contains_key(&cookie) {
             return Err(HsmError::Begin(libc_eexist()));
         }
-        self.in_flight.insert(cookie, InFlight { progress: Extent::new(0, 0) });
+        self.in_flight.insert(
+            cookie,
+            InFlight {
+                progress: Extent::new(0, 0),
+            },
+        );
         Ok(ActionHandle::new(self, cookie))
     }
 
@@ -124,7 +136,10 @@ impl MockCopytool {
 
 impl HasCookieLifecycle for MockCopytool {
     fn cookie_progress(&mut self, cookie: Cookie, e: Extent) -> Result<()> {
-        let slot = self.in_flight.get_mut(&cookie).ok_or(HsmError::UnknownCookie(cookie.get()))?;
+        let slot = self
+            .in_flight
+            .get_mut(&cookie)
+            .ok_or(HsmError::UnknownCookie(cookie.get()))?;
         // Reject backwards progress (matches the store's invariant; see DESIGN.md §16).
         if e.offset < slot.progress.offset {
             return Err(HsmError::Progress(libc_einval()));
@@ -238,7 +253,9 @@ mod tests {
         // double-begin race; this test confirms that even after drop
         // (which abandons), re-begin works (clean slate).
         drop(h1);
-        let _h2 = ct.begin(cookie).expect("re-begin after abandon should be fine");
+        let _h2 = ct
+            .begin(cookie)
+            .expect("re-begin after abandon should be fine");
     }
 
     #[test]

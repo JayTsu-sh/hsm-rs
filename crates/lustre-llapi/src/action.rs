@@ -131,7 +131,11 @@ impl<'c, C: HasCookieLifecycle> ActionHandle<'c, C> {
     /// handle via the parent's `begin`, never by calling this directly.
     #[doc(hidden)]
     pub fn new(parent: &'c mut C, cookie: Cookie) -> Self {
-        Self { parent, cookie, finished: false }
+        Self {
+            parent,
+            cookie,
+            finished: false,
+        }
     }
 
     /// Cookie this handle tracks.

@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 
-use crate::agent::{failed_from_error, ActionStatus, AgentConn, AgentSink, DispatchedAction};
+use crate::agent::{ActionStatus, AgentConn, AgentSink, DispatchedAction, failed_from_error};
 
 /// Spawn an in-process agent that dispatches work to `mover`. Returns a
 /// pre-built [`AgentConn`] the daemon can register; the spawned task
@@ -54,7 +54,12 @@ impl InProcessAgent {
     where
         M: hsm_plugin_sdk::Mover,
     {
-        let (conn, sink) = AgentSink::pair(id.clone(), archives, /* action */ 64, /* status */ 256);
+        let (conn, sink) = AgentSink::pair(
+            id.clone(),
+            archives,
+            /* action */ 64,
+            /* status */ 256,
+        );
         let cancels: Arc<Mutex<HashMap<Cookie, CancellationToken>>> = Arc::default();
         let task = tokio::spawn(run_agent(id, mover, sink, cancels.clone(), progress_config));
         (conn, Self { task, cancels })
@@ -149,7 +154,9 @@ fn spawn_action_task<M: hsm_plugin_sdk::Mover>(
             ActionKind::Archive => mover.archive(ctx).await.map(Some),
             ActionKind::Restore => {
                 let obj = action.existing.clone().ok_or_else(|| {
-                    MoverError::Other(format!("restore for {cookie} missing existing BackendObject"))
+                    MoverError::Other(format!(
+                        "restore for {cookie} missing existing BackendObject"
+                    ))
                 });
                 match obj {
                     Ok(obj) => mover.restore(ctx, obj).await.map(|()| None),
@@ -158,7 +165,9 @@ fn spawn_action_task<M: hsm_plugin_sdk::Mover>(
             }
             ActionKind::Remove => {
                 let obj = action.existing.clone().ok_or_else(|| {
-                    MoverError::Other(format!("remove for {cookie} missing existing BackendObject"))
+                    MoverError::Other(format!(
+                        "remove for {cookie} missing existing BackendObject"
+                    ))
                 });
                 match obj {
                     Ok(obj) => mover.remove(ctx, obj).await.map(|()| None),
@@ -168,7 +177,9 @@ fn spawn_action_task<M: hsm_plugin_sdk::Mover>(
             ActionKind::Cancel => {
                 // Cancel doesn't get a Mover invocation — the daemon
                 // routes Cancel through cancel_tx instead.
-                Err(MoverError::Other("Cancel routed to mover (daemon bug)".into()))
+                Err(MoverError::Other(
+                    "Cancel routed to mover (daemon bug)".into(),
+                ))
             }
         };
 
@@ -203,7 +214,11 @@ fn spawn_action_task<M: hsm_plugin_sdk::Mover>(
     });
 }
 
-fn build_ctx(d: &DispatchedAction, progress: ProgressReporter, cancel: CancellationToken) -> ActionCtx {
+fn build_ctx(
+    d: &DispatchedAction,
+    progress: ProgressReporter,
+    cancel: CancellationToken,
+) -> ActionCtx {
     let mut b = ActionCtxBuilder::default()
         .cookie(d.action.cookie)
         .fid(d.action.fid)

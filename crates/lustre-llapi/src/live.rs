@@ -17,9 +17,9 @@
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::fd::RawFd;
-use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_longlong};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};

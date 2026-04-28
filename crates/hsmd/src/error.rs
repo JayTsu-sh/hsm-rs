@@ -30,4 +30,8 @@ pub enum DaemonError {
     /// retry, dead-letter, or fail the action.
     #[error("no agent registered for archive_id {0}")]
     NoCapableAgent(u32),
+
+    /// I/O error (e.g. AsyncFd setup on the KUC pipe).
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }

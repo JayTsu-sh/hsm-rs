@@ -10,14 +10,17 @@ authors.workspace = true
 
 [dependencies]
 hsm-core = { path = "../hsm-core" }
+bytes = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 bytes = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

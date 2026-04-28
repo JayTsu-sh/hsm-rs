@@ -102,7 +102,11 @@ impl ProgressReporter {
     /// The channel capacity is small (16) — we don't want backlogs of
     /// progress events; if the consumer falls behind, dropping samples
     /// is correct (next emit carries the latest cumulative count anyway).
-    pub fn new(cookie: Cookie, extent: Extent, config: ProgressConfig) -> (Self, mpsc::Receiver<ProgressEvent>) {
+    pub fn new(
+        cookie: Cookie,
+        extent: Extent,
+        config: ProgressConfig,
+    ) -> (Self, mpsc::Receiver<ProgressEvent>) {
         let (tx, rx) = mpsc::channel(16);
         let reporter = Self {
             cookie,

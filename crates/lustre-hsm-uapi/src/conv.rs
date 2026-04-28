@@ -138,7 +138,12 @@ mod tests {
 
     #[test]
     fn action_kind_to_wire_round_trip() {
-        for k in [ActionKind::Archive, ActionKind::Restore, ActionKind::Remove, ActionKind::Cancel] {
+        for k in [
+            ActionKind::Archive,
+            ActionKind::Restore,
+            ActionKind::Remove,
+            ActionKind::Cancel,
+        ] {
             assert_eq!(action_kind_from_wire(action_kind_to_wire(k)), Ok(k));
         }
     }

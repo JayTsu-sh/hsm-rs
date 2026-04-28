@@ -83,8 +83,11 @@ impl FifoPerKind {
 
     /// Pick an agent for `archive` using a round-robin cursor.
     /// Returns `None` if no connected agent serves this archive.
-    fn pick_agent(rr: &mut std::collections::HashMap<ArchiveId, usize>,
-                  agents: &AgentRegistry, archive: ArchiveId) -> Option<AgentId> {
+    fn pick_agent(
+        rr: &mut std::collections::HashMap<ArchiveId, usize>,
+        agents: &AgentRegistry,
+        archive: ArchiveId,
+    ) -> Option<AgentId> {
         let candidates = agents.agents_serving(archive);
         if candidates.is_empty() {
             return None;
@@ -119,7 +122,9 @@ impl Scheduler for FifoPerKind {
         // submission.
         let mut requeue: Vec<Action> = Vec::new();
         while out.len() < max {
-            let Some(action) = Self::next_action(&mut inner) else { break };
+            let Some(action) = Self::next_action(&mut inner) else {
+                break;
+            };
             match Self::pick_agent(&mut inner.rr, agents, action.archive_id) {
                 Some(agent) => out.push(Assignment { action, agent }),
                 None => requeue.push(action),
@@ -252,7 +257,10 @@ mod tests {
             s.enqueue(act(c, ActionKind::Archive, 1));
         }
         let picked = s.pick_ready(&r, 6);
-        let agents: Vec<_> = picked.iter().map(|a| a.agent.as_str().to_string()).collect();
+        let agents: Vec<_> = picked
+            .iter()
+            .map(|a| a.agent.as_str().to_string())
+            .collect();
 
         // We saw both agents (round-robin worked) and the population is
         // balanced (3 each in any order — agents_serving returns a Vec

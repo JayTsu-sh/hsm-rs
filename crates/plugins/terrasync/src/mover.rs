@@ -23,9 +23,9 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
+use data_mover::{EntryEnum, LocalStorage, NASEntry, StorageEnum};
 use hsm_core::BackendObject;
 use hsm_plugin_sdk::{ActionCtx, Mover, MoverError, MoverResult};
-use storage_v2::{EntryEnum, LocalStorage, NASEntry, StorageEnum};
 use tracing::{debug, info, warn};
 
 use crate::config::ArchiveLayout;
@@ -123,7 +123,8 @@ impl Mover for TerrasyncMover {
         // Compatible with `lhsmtool_posix` shadow layout so the archive can
         // be browsed by original path (not just by FID).
         if let Some(ref lustre_path) = ctx.lustre_path {
-            self.write_shadow(lustre_path, ctx.archive_id, ctx.fid).await;
+            self.write_shadow(lustre_path, ctx.archive_id, ctx.fid)
+                .await;
         }
 
         let url = self.layout.url(ctx.archive_id, ctx.fid);
@@ -254,7 +255,12 @@ impl TerrasyncMover {
     ///
     /// **Other backends (S3, NFS, CIFS)**: writes a small pointer object
     /// at `shadow/<lustre_path>` whose content is the FID string.
-    async fn write_shadow(&self, lustre_path: &Path, archive_id: hsm_core::ArchiveId, fid: hsm_core::Fid) {
+    async fn write_shadow(
+        &self,
+        lustre_path: &Path,
+        archive_id: hsm_core::ArchiveId,
+        fid: hsm_core::Fid,
+    ) {
         match &*self.dst {
             StorageEnum::Local(_) => {
                 // file:// mode: create a symlink exactly like lhsmtool_posix.
@@ -291,8 +297,7 @@ impl TerrasyncMover {
                 let shadow_key = ArchiveLayout::shadow_relative(lustre_path);
                 let content = Bytes::from(ArchiveLayout::uuid_for(fid));
                 let entry = synth_dest_entry(shadow_key, content.len() as u64);
-                if let Err(e) =
-                    StorageEnum::write_file_from_bytes(&self.dst, &entry, content).await
+                if let Err(e) = StorageEnum::write_file_from_bytes(&self.dst, &entry, content).await
                 {
                     warn!(
                         target: "hsm.plugin.terrasync",
@@ -394,8 +399,8 @@ fn synth_dest_entry(relative_path: PathBuf, size: u64) -> EntryEnum {
     })
 }
 
-fn map_storage_err(e: storage_v2::error::StorageError, ctx_path: &Path) -> MoverError {
-    use storage_v2::error::StorageError;
+fn map_storage_err(e: data_mover::error::StorageError, ctx_path: &Path) -> MoverError {
+    use data_mover::error::StorageError;
     match e {
         StorageError::IoError(io) if io.kind() == std::io::ErrorKind::NotFound => {
             MoverError::Backend {
@@ -417,8 +422,8 @@ fn map_storage_err(e: storage_v2::error::StorageError, ctx_path: &Path) -> Mover
     }
 }
 
-fn is_not_found(e: &storage_v2::error::StorageError) -> bool {
-    use storage_v2::error::StorageError;
+fn is_not_found(e: &data_mover::error::StorageError) -> bool {
+    use data_mover::error::StorageError;
     matches!(e, StorageError::IoError(io) if io.kind() == std::io::ErrorKind::NotFound)
 }
 

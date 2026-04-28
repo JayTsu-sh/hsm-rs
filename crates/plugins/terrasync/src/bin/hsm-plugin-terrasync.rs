@@ -1,38 +1,50 @@
-//! `hsm-plugin-terrasync` binary.
+//! `hsm-plugin-terrasync` binary — unified multi-backend HSM mover.
 //!
 //! Connects to `hsmd` over UDS, registers the configured archive_ids,
 //! and runs [`TerrasyncMover`] until the daemon closes the stream or
 //! SIGINT/SIGTERM arrives.
 //!
-//! Config (TOML):
-//!   socket_path       = "/var/run/hsmd/agent.sock"
-//!   agent_id          = "terrasync-1"
-//!   archive_ids       = [1]
-//!   archive_root_url  = "file:///var/hsm-archive"            # file backend
-//!   # archive_root_url = "s3+https://ak:sk@bucket.host:port" # S3 backend
-//!   log_filter        = "info"   # optional
+//! ## Backend selection
 //!
-//! S3 URL format (compatible with storage_v2):
-//!   s3+https://ACCESS_KEY:SECRET_KEY@BUCKET.HOST:PORT
-//!   s3+http://ACCESS_KEY:SECRET_KEY@BUCKET.HOST:PORT   (for plaintext, e.g. RustFS)
-//!   s3://ACCESS_KEY:SECRET_KEY@BUCKET.HOST:PORT         (defaults to HTTPS)
+//! The backend is chosen entirely by the `archive_root_url` scheme.
+//! No separate binary per backend — build-time Cargo features control
+//! which schemes are compiled in:
 //!
-//! Example for RustFS at 192.168.50.23:9090 with bucket "hsm-archive":
-//!   archive_root_url = "s3+https://minioadmin:minioadmin@hsm-archive.192.168.50.23:9090"
+//! | Scheme | Feature flag | Default |
+//! |--------|-------------|---------|
+//! | `file://` | always on | ✓ |
+//! | `nfs://` | `nfs` | off |
+//! | `s3://` / `s3+http://` / `s3+https://` | `s3` | off |
 //!
-//! Mirrors hsm-plugin-noop's CLI / signal / tracing plumbing —
-//! single entrypoint, no clap dependency, explicit
-//! `with_writer(std::io::stderr)` so logs survive subprocess pipes.
+//! Build examples:
+//! ```text
+//! cargo build --bin hsm-plugin-terrasync                  # file:// only
+//! cargo build --bin hsm-plugin-terrasync --features nfs   # + NFS
+//! cargo build --bin hsm-plugin-terrasync --features s3    # + S3
+//! cargo build --bin hsm-plugin-terrasync --features nfs,s3
+//! ```
+//!
+//! ## Config (TOML)
+//!
+//! ```toml
+//! socket_path      = "/var/run/hsmd/agent.sock"
+//! agent_id         = "terrasync-1"
+//! archive_ids      = [1]
+//! archive_root_url = "file:///var/hsm-archive"
+//! # archive_root_url = "nfs://192.168.1.1/export:hsm"      # requires --features nfs
+//! # archive_root_url = "s3+https://ak:sk@bucket.host:9000"  # requires --features s3
+//! log_filter       = "info"   # optional
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use data_mover::{LocalStorage, StorageEnum};
 use hsm_core::ArchiveId;
 use hsm_plugin_sdk::{RunConfig, run_with_channel};
 use hsm_plugin_terrasync::{ArchiveLayout, BackendScheme, BackendUrl, TerrasyncMover};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
-use data_mover::{LocalStorage, StorageEnum, create_nfs_storage_ensuring_dir, create_storage};
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
@@ -246,74 +258,74 @@ async fn main() -> std::process::ExitCode {
     exit
 }
 
-/// Build a [`TerrasyncMover`] for the parsed backend URL. M3a wires
-/// `file://` end-to-end. Other schemes (`s3://`, `nfs://`, `cifs://`)
-/// parse cleanly upstream but fail here with a "not yet wired"
-/// message so deployments don't silently fall back to an unintended
-/// backend.
-/// Build a [`TerrasyncMover`] for the parsed backend URL.
-///
-/// Supported backends:
-/// - `file://<path>` — local POSIX filesystem (file:// mode)
-/// - `s3://<ak>:<sk>@<bucket>.<host>:<port>` — AWS S3 / MinIO / RustFS
-/// - `s3+https://<ak>:<sk>@<bucket>.<host>:<port>` — S3 over HTTPS (skip TLS verify)
-/// - `s3+http://<ak>:<sk>@<bucket>.<host>:<port>` — S3 over plaintext HTTP
+/// Dispatch to the scheme-specific mover constructor.
 async fn build_mover(raw_url: &str, parsed: &BackendUrl) -> Result<TerrasyncMover, String> {
     match parsed.scheme {
-        BackendScheme::File => {
-            if !parsed.path.is_absolute() {
-                return Err(format!(
-                    "file:// URL path must be absolute, got {}",
-                    parsed.path.display()
-                ));
-            }
-            std::fs::create_dir_all(&parsed.path)
-                .map_err(|e| format!("create archive_root {}: {e}", parsed.path.display()))?;
-            let layout = ArchiveLayout::new(parsed.path.clone());
-            let dst = Arc::new(StorageEnum::Local(LocalStorage::new(
-                layout.root.clone(),
-                None,
-            )));
-            Ok(TerrasyncMover::with_dst(dst, layout))
+        BackendScheme::File => build_file_mover(parsed),
+        BackendScheme::S3 => build_s3_mover(raw_url, parsed).await,
+        BackendScheme::Nfs => build_nfs_mover(raw_url).await,
+        BackendScheme::Cifs => {
+            Err("cifs:// is not yet implemented; use file://, nfs://, or s3://".into())
         }
-        BackendScheme::S3 => {
-            // Delegate URL parsing + client construction to storage_v2.
-            // create_s3_storage() handles s3://, s3+http://, s3+https://,
-            // including credentials extraction and TLS configuration.
-            let storage: StorageEnum = create_storage(raw_url, None)
-                .await
-                .map_err(|e| format!("S3 storage init failed for {raw_url}: {e}"))?;
-
-            // Derive the archive root path (for ArchiveLayout) from the URL path.
-            // For `s3://ak:sk@bucket.host:port/prefix`, path is `/prefix`.
-            // If no prefix, root is just "/" relative to bucket root.
-            let archive_root = if parsed.path.as_os_str().is_empty()
-                || parsed.path == std::path::Path::new("/")
-            {
-                std::path::PathBuf::from("/")
-            } else {
-                parsed.path.clone()
-            };
-            let layout = ArchiveLayout::new(archive_root);
-            let dst = Arc::new(storage);
-            Ok(TerrasyncMover::with_dst(dst, layout))
-        }
-        BackendScheme::Nfs => {
-            // create_nfs_storage_ensuring_dir mounts the NFS export and
-            // creates the root_dir subdirectory if it does not yet exist.
-            let storage: StorageEnum = create_nfs_storage_ensuring_dir(raw_url, None)
-                .await
-                .map_err(|e| format!("NFS storage init failed for {raw_url}: {e}"))?;
-            // ArchiveLayout root is "/" — NFSStorage already anchors paths
-            // at the root_dir specified in the URL (e.g. ":hsm-archive").
-            let layout = ArchiveLayout::new(std::path::PathBuf::from("/"));
-            let dst = Arc::new(storage);
-            Ok(TerrasyncMover::with_dst(dst, layout))
-        }
-        BackendScheme::Cifs => Err(format!(
-            "scheme cifs not yet implemented; use file://, s3://, or nfs://"
-        )),
     }
+}
+
+/// `file://<path>` — local POSIX filesystem. Always compiled in.
+fn build_file_mover(parsed: &BackendUrl) -> Result<TerrasyncMover, String> {
+    if !parsed.path.is_absolute() {
+        return Err(format!(
+            "file:// URL path must be absolute, got {}",
+            parsed.path.display()
+        ));
+    }
+    std::fs::create_dir_all(&parsed.path)
+        .map_err(|e| format!("create archive_root {}: {e}", parsed.path.display()))?;
+    let layout = ArchiveLayout::new(parsed.path.clone());
+    let dst = Arc::new(StorageEnum::Local(LocalStorage::new(
+        layout.root.clone(),
+        None,
+    )));
+    Ok(TerrasyncMover::with_dst(dst, layout))
+}
+
+/// `s3://` / `s3+http://` / `s3+https://` — compiled in when feature `s3` is enabled.
+#[cfg(feature = "s3")]
+async fn build_s3_mover(raw_url: &str, parsed: &BackendUrl) -> Result<TerrasyncMover, String> {
+    use data_mover::create_storage;
+    let storage: StorageEnum = create_storage(raw_url, None)
+        .await
+        .map_err(|e| format!("S3 storage init failed for {raw_url}: {e}"))?;
+    let archive_root =
+        if parsed.path.as_os_str().is_empty() || parsed.path == std::path::Path::new("/") {
+            std::path::PathBuf::from("/")
+        } else {
+            parsed.path.clone()
+        };
+    let layout = ArchiveLayout::new(archive_root);
+    Ok(TerrasyncMover::with_dst(Arc::new(storage), layout))
+}
+
+#[cfg(not(feature = "s3"))]
+async fn build_s3_mover(_raw_url: &str, _parsed: &BackendUrl) -> Result<TerrasyncMover, String> {
+    Err("s3:// backend is not compiled in; rebuild with --features s3".into())
+}
+
+/// `nfs://<server>/<export>` — compiled in when feature `nfs` is enabled.
+#[cfg(feature = "nfs")]
+async fn build_nfs_mover(raw_url: &str) -> Result<TerrasyncMover, String> {
+    use data_mover::create_nfs_storage_ensuring_dir;
+    let storage: StorageEnum = create_nfs_storage_ensuring_dir(raw_url, None)
+        .await
+        .map_err(|e| format!("NFS storage init failed for {raw_url}: {e}"))?;
+    // NFSStorage anchors all paths at the root_dir from the URL (e.g. ":hsm-archive"),
+    // so ArchiveLayout root is "/" — relative paths resolve inside the NFS mount.
+    let layout = ArchiveLayout::new(std::path::PathBuf::from("/"));
+    Ok(TerrasyncMover::with_dst(Arc::new(storage), layout))
+}
+
+#[cfg(not(feature = "nfs"))]
+async fn build_nfs_mover(_raw_url: &str) -> Result<TerrasyncMover, String> {
+    Err("nfs:// backend is not compiled in; rebuild with --features nfs".into())
 }
 
 async fn wait_for_shutdown_signal() {

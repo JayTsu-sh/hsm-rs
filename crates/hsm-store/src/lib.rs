@@ -27,10 +27,14 @@
 
 #![warn(missing_docs)]
 
+pub mod any;
 pub mod error;
 pub mod mem;
+pub mod sqlite;
 pub mod store;
 
+pub use any::AnyStore;
 pub use error::{StoreError, StoreResult};
 pub use mem::MemStore;
+pub use sqlite::SqliteStore;
 pub use store::ActionStore;

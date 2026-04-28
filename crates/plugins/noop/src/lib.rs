@@ -215,7 +215,10 @@ fn stub_hash(cookie: u64) -> [u8; 32] {
 mod tests {
     use std::time::Duration;
 
-    use hsm_plugin_sdk::{ActionCtx, ArchiveId, BackendObject, CancellationToken, Cookie, Extent, Fid, ProgressReporter};
+    use hsm_plugin_sdk::{
+        ActionCtx, ArchiveId, BackendObject, CancellationToken, Cookie, Extent, Fid,
+        ProgressReporter,
+    };
 
     use super::*;
 
@@ -223,7 +226,10 @@ mod tests {
         cookie: u64,
         kind: ActionKind,
         token: CancellationToken,
-    ) -> (ActionCtx, tokio::sync::mpsc::Receiver<hsm_plugin_sdk::ProgressEvent>) {
+    ) -> (
+        ActionCtx,
+        tokio::sync::mpsc::Receiver<hsm_plugin_sdk::ProgressEvent>,
+    ) {
         let (p, rx) = ProgressReporter::with_defaults(Cookie::new(cookie), Extent::WHOLE);
         let ctx = ActionCtx::builder()
             .cookie(Cookie::new(cookie))
@@ -319,7 +325,10 @@ mod tests {
         while let Ok(ev) = rx.try_recv() {
             events.push(ev);
         }
-        assert!(!events.is_empty(), "expected at least the final flush event");
+        assert!(
+            !events.is_empty(),
+            "expected at least the final flush event"
+        );
         // Last event must be the cumulative total.
         assert_eq!(events.last().unwrap().bytes_advanced, 16 * 1024 * 1024);
     }

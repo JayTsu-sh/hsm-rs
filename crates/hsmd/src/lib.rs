@@ -32,6 +32,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod control;
 pub mod copytool_recv;
 pub mod daemon;
 pub mod error;
@@ -40,7 +41,8 @@ pub mod inproc;
 pub mod xattr_store;
 
 pub use agent::{AgentConn, AgentSink, DispatchedAction};
-pub use copytool_recv::{MockRecvSource, RecvSource};
+pub use control::HsmControlService;
+pub use copytool_recv::{AnyRecvSource, LiveRecvSource, MockRecvSource, RecvSource};
 pub use daemon::{Daemon, DaemonConfig, DaemonHandle};
 pub use error::{DaemonError, DaemonResult};
 pub use grpc::{AgentRegistrar, GrpcAgentService};

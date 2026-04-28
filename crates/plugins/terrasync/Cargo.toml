@@ -1,12 +1,21 @@
 [package]
 name = "hsm-plugin-terrasync"
-description = "hsm-rs Mover backed by terrasync-rs storage_v2 (file:// in M2e; S3/NFS/CIFS in M3)."
+description = "hsm-rs Mover backed by terrasync-rs storage_v2. file:// always included; enable 'nfs' or 's3' features for those backends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[features]
+# file:// (local POSIX) is always compiled in — zero extra deps.
+# Enable 'nfs' for nfs:// support, 's3' for s3:// / s3+http:// / s3+https://.
+# When data-mover grows its own feature gates, wire them here:
+#   nfs = ["data-mover/nfs"]
+#   s3  = ["data-mover/s3"]
+nfs = []
+s3  = []
 
 [lib]
 path = "src/lib.rs"
@@ -18,7 +27,7 @@ path = "src/bin/hsm-plugin-terrasync.rs"
 [dependencies]
 hsm-core = { path = "../../hsm-core" }
 hsm-plugin-sdk = { path = "../../hsm-plugin-sdk" }
-storage_v2 = { path = "../../../../terrasync-rs/crates/storage_v2" }
+data-mover = { git = "https://github.com/JayTsu-sh/data-mover-rs.git" }
 
 blake3 = "1"
 bytes = { workspace = true }

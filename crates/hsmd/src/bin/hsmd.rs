@@ -24,14 +24,15 @@ use std::time::Duration;
 use bytes::Bytes;
 use hsm_core::{ActionKind, ArchiveId, Cookie, Extent, Fid};
 use hsm_proto::v1::data_mover_server::DataMoverServer;
+use hsm_proto::v1::hsm_control_server::HsmControlServer;
 use hsm_scheduler::FifoPerKind;
-use hsm_store::MemStore;
+use hsm_store::{AnyStore, MemStore, SqliteStore};
 use hsmd::config::{HsmdConfig, LogFormat, MockAction, Mode};
 use hsmd::{AnyRecvSource, Daemon, GrpcAgentService, LiveRecvSource, MockRecvSource};
 use lustre_llapi::{MockCopytool, ReceivedAction};
 use parking_lot::Mutex;
 use tokio::net::UnixListener;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -118,8 +119,12 @@ async fn main() -> std::process::ExitCode {
                 error!(target: "hsmd", "mode = \"live\" requires at least one archive_id");
                 return std::process::ExitCode::from(2);
             }
-            let archives: Vec<ArchiveId> =
-                cfg.archive_ids.iter().copied().map(ArchiveId::new).collect();
+            let archives: Vec<ArchiveId> = cfg
+                .archive_ids
+                .iter()
+                .copied()
+                .map(ArchiveId::new)
+                .collect();
             match LiveRecvSource::new(&cfg.mountpoint, &archives) {
                 Ok(src) => {
                     info!(
@@ -144,7 +149,30 @@ async fn main() -> std::process::ExitCode {
     };
 
     // --- daemon -------------------------------------------------------------
-    let store = Arc::new(MemStore::new());
+    let store = Arc::new(match &cfg.store_path {
+        None => AnyStore::Mem(MemStore::new()),
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        error!(target: "hsmd", error = %e, dir = %parent.display(), "create store dir failed");
+                        return std::process::ExitCode::from(1);
+                    }
+                }
+            }
+            let url = format!("sqlite://{}", path.display());
+            match SqliteStore::open(&url).await {
+                Ok(s) => {
+                    info!(target: "hsmd", path = %path.display(), "using SqliteStore");
+                    AnyStore::Sqlite(s)
+                }
+                Err(e) => {
+                    error!(target: "hsmd", error = %e, path = %path.display(), "open sqlite store failed");
+                    return std::process::ExitCode::from(1);
+                }
+            }
+        }
+    });
     let scheduler = Arc::new(FifoPerKind::new());
     let mut daemon_cfg = cfg.to_daemon_config();
     // Wire the completion channel so llapi_hsm_action_end is called after
@@ -152,6 +180,8 @@ async fn main() -> std::process::ExitCode {
     // returns None from completion_tx()).
     daemon_cfg.completion_tx = recv.completion_tx();
     let daemon = Daemon::new(store, scheduler, recv, daemon_cfg);
+    daemon.recover().await;
+    let ctl_svc = daemon.control_service();
     let handle = daemon.start();
     info!(target: "hsmd", "daemon loops running");
 
@@ -184,6 +214,7 @@ async fn main() -> std::process::ExitCode {
     let server_task = tokio::spawn(async move {
         let res = Server::builder()
             .add_service(DataMoverServer::new(svc))
+            .add_service(HsmControlServer::new(ctl_svc))
             .serve_with_incoming_shutdown(incoming, async move {
                 server_shutdown_inner.cancelled().await;
             })
@@ -194,9 +225,10 @@ async fn main() -> std::process::ExitCode {
     });
 
     // --- mock-actions file watcher (mock mode only, optional) ---------------
-    let mock_watcher_task = cfg.mock_actions_file.clone().and_then(|path| {
-        mock_ct.map(|ct| spawn_mock_watcher(path, ct))
-    });
+    let mock_watcher_task = cfg
+        .mock_actions_file
+        .clone()
+        .and_then(|path| mock_ct.map(|ct| spawn_mock_watcher(path, ct)));
 
     // --- shutdown signal handling ------------------------------------------
     info!(target: "hsmd", "ready (Ctrl-C or SIGTERM to stop)");

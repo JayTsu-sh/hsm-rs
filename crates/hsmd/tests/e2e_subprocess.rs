@@ -39,7 +39,11 @@ fn binary_path(name: &str) -> PathBuf {
     if let Ok(p) = std::env::var(&key) {
         return PathBuf::from(p);
     }
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     workspace_target_dir().join(profile).join(name)
 }
 

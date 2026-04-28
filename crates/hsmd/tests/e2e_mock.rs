@@ -80,7 +80,12 @@ async fn archive_action_flows_through_full_pipeline() {
 
     // Build daemon and the agent before starting; the recv loop won't
     // see an action until the test enqueues one.
-    let daemon = Daemon::new(store.clone(), scheduler.clone(), recv, DaemonConfig::default());
+    let daemon = Daemon::new(
+        store.clone(),
+        scheduler.clone(),
+        recv,
+        DaemonConfig::default(),
+    );
     let mover = Arc::new(NoopMover::default());
     let (conn, _agent) = InProcessAgent::spawn(
         hsm_core::AgentId::new("noop-0"),
@@ -140,7 +145,12 @@ async fn many_actions_complete_concurrently() {
     let ct = Arc::new(Mutex::new(MockCopytool::new()));
     let recv = MockRecvSource::new(ct.clone(), Duration::from_millis(5));
 
-    let daemon = Daemon::new(store.clone(), scheduler.clone(), recv, DaemonConfig::default());
+    let daemon = Daemon::new(
+        store.clone(),
+        scheduler.clone(),
+        recv,
+        DaemonConfig::default(),
+    );
     let mover = Arc::new(NoopMover::default());
     let (conn, _agent) = InProcessAgent::spawn(
         hsm_core::AgentId::new("noop-0"),
@@ -167,7 +177,11 @@ async fn many_actions_complete_concurrently() {
         async move { mover.invocations().len() == 20 }
     })
     .await;
-    assert!(ok, "expected 20 invocations, got {}", mover.invocations().len());
+    assert!(
+        ok,
+        "expected 20 invocations, got {}",
+        mover.invocations().len()
+    );
 
     // None should have been cancelled.
     assert!(mover.invocations().iter().all(|i| !i.cancelled));
@@ -185,7 +199,12 @@ async fn cancel_tx_propagates_through_agent_into_mover() {
     let ct = Arc::new(Mutex::new(MockCopytool::new()));
     let recv = MockRecvSource::new(ct.clone(), Duration::from_millis(5));
 
-    let daemon = Daemon::new(store.clone(), scheduler.clone(), recv, DaemonConfig::default());
+    let daemon = Daemon::new(
+        store.clone(),
+        scheduler.clone(),
+        recv,
+        DaemonConfig::default(),
+    );
 
     // Slow mover: 16 chunks of 1 MiB with 50 ms delay each → ~800 ms
     // unconstrained. Cancel after ~120 ms must abort with ECANCELED.
@@ -208,7 +227,8 @@ async fn cancel_tx_propagates_through_agent_into_mover() {
     let handle = daemon.start();
 
     let cookie = Cookie::new(0xc1);
-    ct.lock().enqueue(sample(cookie.get(), ActionKind::Archive, 1));
+    ct.lock()
+        .enqueue(sample(cookie.get(), ActionKind::Archive, 1));
 
     // Wait for the action to be dispatched (state = Started).
     let s2 = store.clone();
@@ -257,7 +277,12 @@ async fn action_for_unmatched_archive_stays_queued() {
     let ct = Arc::new(Mutex::new(MockCopytool::new()));
     let recv = MockRecvSource::new(ct.clone(), Duration::from_millis(5));
 
-    let daemon = Daemon::new(store.clone(), scheduler.clone(), recv, DaemonConfig::default());
+    let daemon = Daemon::new(
+        store.clone(),
+        scheduler.clone(),
+        recv,
+        DaemonConfig::default(),
+    );
     // Agent serves archive_id=2 but the action targets archive_id=1.
     let mover = Arc::new(NoopMover::default());
     let (conn, _agent) = InProcessAgent::spawn(

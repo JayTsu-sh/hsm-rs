@@ -16,7 +16,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hsm_core::{ActionKind, AgentId, ArState, ArchiveId, Cookie, Extent, Fid};
 use hsm_plugin_noop::NoopMover;
-use hsm_plugin_sdk::{run_with_channel, ProgressConfig, RunConfig};
+use hsm_plugin_sdk::{ProgressConfig, RunConfig, run_with_channel};
 use hsm_proto::v1::data_mover_server::DataMoverServer;
 use hsm_scheduler::FifoPerKind;
 use hsm_store::{ActionStore, MemStore};
@@ -172,9 +172,8 @@ async fn spawn_rig(name: &str, mover: Arc<NoopMover>, plugin_archives: Vec<Archi
         ..RunConfig::new("noop-grpc", plugin_archives)
     };
     let mover_for_plugin = mover.clone();
-    let plugin_task = tokio::spawn(async move {
-        run_with_channel(channel, mover_for_plugin, plugin_cfg).await
-    });
+    let plugin_task =
+        tokio::spawn(async move { run_with_channel(channel, mover_for_plugin, plugin_cfg).await });
 
     // Wait for the agent to register before returning. registry() lives
     // on the owned handle — we just borrow it.
@@ -214,7 +213,10 @@ async fn archive_action_flows_through_grpc_pipeline() {
         }
     })
     .await;
-    assert!(ok, "expected cookie 0xa1 to reach Succeed within 3s over gRPC");
+    assert!(
+        ok,
+        "expected cookie 0xa1 to reach Succeed within 3s over gRPC"
+    );
 
     let invs = mover.invocations();
     assert_eq!(invs.len(), 1);
@@ -242,7 +244,11 @@ async fn many_actions_complete_concurrently_over_grpc() {
         async move { m.invocations().len() == 20 }
     })
     .await;
-    assert!(ok, "expected 20 invocations, got {}", mover.invocations().len());
+    assert!(
+        ok,
+        "expected 20 invocations, got {}",
+        mover.invocations().len()
+    );
     assert!(mover.invocations().iter().all(|i| !i.cancelled));
 
     rig.shutdown().await;
@@ -258,7 +264,9 @@ async fn cancel_propagates_via_grpc_to_mover() {
     let rig = spawn_rig("cancel", mover.clone(), vec![ArchiveId::new(1)]).await;
 
     let cookie = Cookie::new(0xc1);
-    rig.ct.lock().enqueue(sample(cookie.get(), ActionKind::Archive, 1));
+    rig.ct
+        .lock()
+        .enqueue(sample(cookie.get(), ActionKind::Archive, 1));
 
     // Wait for dispatch before cancelling.
     let s2 = rig.store.clone();

@@ -104,7 +104,10 @@ impl Extent {
     pub const WHOLE_LENGTH: u64 = u64::MAX;
 
     /// Whole-file extent starting at byte 0.
-    pub const WHOLE: Self = Self { offset: 0, length: Self::WHOLE_LENGTH };
+    pub const WHOLE: Self = Self {
+        offset: 0,
+        length: Self::WHOLE_LENGTH,
+    };
 
     /// Concrete extent.
     pub const fn new(offset: u64, length: u64) -> Self {
@@ -177,7 +180,10 @@ pub enum ArState {
 impl ArState {
     /// `true` if no further state transitions are expected.
     pub const fn is_terminal(&self) -> bool {
-        matches!(self, ArState::Succeed { .. } | ArState::Failed { .. } | ArState::Canceled)
+        matches!(
+            self,
+            ArState::Succeed { .. } | ArState::Failed { .. } | ArState::Canceled
+        )
     }
 }
 
@@ -252,11 +258,13 @@ mod tests {
     #[test]
     fn ar_state_terminal_classification() {
         assert!(!ArState::Waiting.is_terminal());
-        assert!(!ArState::Started {
-            agent: AgentId::new("m0"),
-            since_unix_ms: 0,
-        }
-        .is_terminal());
+        assert!(
+            !ArState::Started {
+                agent: AgentId::new("m0"),
+                since_unix_ms: 0,
+            }
+            .is_terminal()
+        );
         assert!(ArState::Succeed { rc: 0 }.is_terminal());
         assert!(ArState::Failed { rc: 5 }.is_terminal());
         assert!(ArState::Canceled.is_terminal());

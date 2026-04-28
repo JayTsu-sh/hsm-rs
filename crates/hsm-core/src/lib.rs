@@ -16,7 +16,7 @@ pub mod errno;
 pub mod fid;
 pub mod xattr;
 
-pub use action::{Action, ActionKind, AgentId, ArState, ActionRecord, Cookie, Extent};
+pub use action::{Action, ActionKind, ActionRecord, AgentId, ArState, Cookie, Extent};
 pub use backend::{ArchiveId, BackendObject};
 pub use errno::HsmErrno;
 pub use fid::Fid;

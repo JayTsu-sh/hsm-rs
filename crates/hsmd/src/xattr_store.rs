@@ -277,7 +277,9 @@ mod tests {
         xattr::set(&path, "user.lhsm_uuid", b"abc").unwrap();
         let err = read_obj(&path, XattrNamespace::User).unwrap_err();
         match err {
-            XattrError::Partial { present, missing, .. } => {
+            XattrError::Partial {
+                present, missing, ..
+            } => {
                 assert_eq!(present, 1);
                 assert_eq!(missing.len(), 2);
             }

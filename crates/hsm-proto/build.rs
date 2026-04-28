@@ -25,9 +25,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the generated `oneof` enums for FromPlugin/ToPlugin would
         // otherwise pull in serde paths through a derive that
         // doesn't fit prost's representation.
-        .message_attribute("hsm.v1.BackendObject", "#[derive(serde::Serialize, serde::Deserialize)]")
-        .message_attribute("hsm.v1.ActionItem",   "#[derive(serde::Serialize, serde::Deserialize)]")
-        .message_attribute("hsm.v1.ActionStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .message_attribute(
+            "hsm.v1.BackendObject",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .message_attribute(
+            "hsm.v1.ActionItem",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .message_attribute(
+            "hsm.v1.ActionStatus",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .compile_protos(&["proto/hsm_v1.proto"], &["proto"])?;
 
     Ok(())

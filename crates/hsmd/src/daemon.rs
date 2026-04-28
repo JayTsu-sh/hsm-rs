@@ -87,6 +87,12 @@ pub struct DaemonConfig {
     /// causes the `LiveRecvSource` thread to call `llapi_hsm_action_end`.
     /// `None` for mock / in-process tests where no Lustre kernel is present.
     pub completion_tx: Option<crate::copytool_recv::CompletionTx>,
+
+    /// How long to wait for an agent to reconnect and claim a `Started`
+    /// action before re-queuing it as `Waiting` on daemon restart.
+    /// Should be longer than the longest expected plugin restart time.
+    /// Defaults to 10 minutes.
+    pub recovery_grace_period: Duration,
 }
 
 impl Default for DaemonConfig {
@@ -102,6 +108,7 @@ impl Default for DaemonConfig {
             xattr_namespace: None,
             use_lustre_fid_path: false,
             completion_tx: None,
+            recovery_grace_period: Duration::from_secs(600),
         }
     }
 }
@@ -121,11 +128,19 @@ pub struct DaemonHandle {
     registry: AgentRegistry,
     agents: Arc<RwLock<HashMap<AgentId, AgentChannels>>>,
     register_tx: mpsc::Sender<AgentConn>,
+    /// Cancel tokens for grace-period watcher tasks from `recover()`.
+    /// Drained here (not in `start()`) so watchers survive until shutdown.
+    recovery_cancels: Arc<parking_lot::Mutex<Vec<CancellationToken>>>,
 }
 
 impl DaemonHandle {
     /// Cancel all tasks and wait for them to exit.
     pub async fn shutdown(self) {
+        // Cancel grace-period watchers first so they don't fire after
+        // the store pool is dropped.
+        for token in self.recovery_cancels.lock().drain(..) {
+            token.cancel();
+        }
         self.cancel.cancel();
         for t in self.tasks {
             let _ = t.await;
@@ -198,6 +213,10 @@ pub struct Daemon<Sched, Store, Recv> {
     /// Per-cookie primary_path stash so the per-agent status drain
     /// can find the file to write xattrs to on Archive completion.
     pub(crate) pending_paths: PendingPaths,
+    /// Cancel tokens for grace-period watcher tasks spawned by `recover()`.
+    /// `start()` drains these into the daemon's cancel scope so shutdown
+    /// correctly aborts all outstanding grace watchers.
+    pub(crate) recovery_cancels: Arc<parking_lot::Mutex<Vec<tokio_util::sync::CancellationToken>>>,
 }
 
 #[derive(Clone)]
@@ -223,6 +242,7 @@ where
             config,
             agents: Arc::default(),
             pending_paths: Arc::new(DashMap::new()),
+            recovery_cancels: Arc::default(),
         }
     }
 
@@ -230,6 +250,118 @@ where
     /// observe which agents are connected.
     pub fn registry(&self) -> &AgentRegistry {
         &self.registry
+    }
+
+    /// Build a [`crate::HsmControlService`] that exposes store + registry
+    /// state via the `HsmControl` gRPC management interface.
+    ///
+    /// Call before [`start`](Self::start) so the service holds valid
+    /// refs before the daemon loops begin. The returned service is passed
+    /// directly to the tonic server.
+    pub fn control_service(&self) -> crate::control::HsmControlService<Store> {
+        crate::control::HsmControlService::new(self.store.clone(), self.registry.clone())
+    }
+
+    /// Replay persisted store state after a daemon restart.
+    ///
+    /// Must be called **before** [`start`](Self::start). For each record:
+    ///
+    /// - `Waiting` → re-enqueued to the scheduler immediately.
+    /// - `Started` → a grace-period watcher task is spawned. If the
+    ///   original agent reconnects and the record transitions away from
+    ///   `Started` before the grace period expires, the watcher is a
+    ///   no-op. Otherwise the record is rolled back to `Waiting` and
+    ///   re-queued.
+    /// - Terminal (`Succeed` / `Failed` / `Canceled`) → deleted from the
+    ///   store (they are already done; no re-dispatch needed).
+    ///
+    /// When `SqliteStore` is in use this provides crash-safe in-flight
+    /// recovery. With `MemStore` the store is always empty on startup so
+    /// this is a no-op.
+    pub async fn recover(&self) {
+        let records = match self.store.load_all().await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(target: "hsmd.recovery", error = %e, "load_all failed; skipping recovery");
+                return;
+            }
+        };
+
+        if records.is_empty() {
+            debug!(target: "hsmd.recovery", "store empty; nothing to recover");
+            return;
+        }
+
+        let mut requeued = 0usize;
+        let mut grace_started = 0usize;
+        let mut cleaned = 0usize;
+
+        for rec in records {
+            let cookie = rec.action.cookie;
+            match &rec.state {
+                ArState::Waiting => {
+                    self.scheduler.enqueue(rec.action.clone());
+                    requeued += 1;
+                }
+                ArState::Started { since_unix_ms, .. } => {
+                    let store = self.store.clone();
+                    let scheduler = self.scheduler.clone();
+                    let action = rec.action.clone();
+                    let grace = self.config.recovery_grace_period;
+                    let started_ms = *since_unix_ms;
+                    // Clone the daemon-level cancel token so grace tasks are
+                    // aborted on DaemonHandle::shutdown() and don't keep the
+                    // store's connection pool alive after the daemon stops.
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let cancel_child = cancel.child_token();
+                    // Store the parent token so start() can cancel all grace tasks.
+                    self.recovery_cancels.lock().push(cancel);
+                    tokio::spawn(async move {
+                        let elapsed = SystemTime::now()
+                            .duration_since(UNIX_EPOCH + Duration::from_millis(started_ms))
+                            .unwrap_or(Duration::ZERO);
+                        let remaining = grace.saturating_sub(elapsed);
+                        tokio::select! {
+                            () = cancel_child.cancelled() => {
+                                debug!(target: "hsmd.recovery", %cookie, "grace task cancelled (shutdown)");
+                                return;
+                            }
+                            () = tokio::time::sleep(remaining) => {}
+                        }
+                        match store.get(cookie).await {
+                            Ok(Some(r)) if matches!(r.state, ArState::Started { .. }) => {
+                                warn!(
+                                    target: "hsmd.recovery",
+                                    %cookie, "grace period expired; rolling back to Waiting"
+                                );
+                                let _ = store.transition(cookie, ArState::Waiting).await;
+                                scheduler.enqueue(action);
+                            }
+                            _ => {
+                                debug!(
+                                    target: "hsmd.recovery",
+                                    %cookie, "grace: action already claimed or completed"
+                                );
+                            }
+                        }
+                    });
+                    grace_started += 1;
+                }
+                _ => {
+                    // Terminal state — clean up the store entry.
+                    if let Err(e) = self.store.delete(cookie).await {
+                        warn!(target: "hsmd.recovery", %cookie, error = %e, "delete terminal record failed");
+                    }
+                    cleaned += 1;
+                }
+            }
+        }
+
+        info!(
+            target: "hsmd.recovery",
+            requeued, grace_started, cleaned,
+            "recovery complete"
+        );
     }
 
     /// Register an agent connection. Spawns the per-agent status drain
@@ -381,6 +513,7 @@ where
             tasks,
             registry: self.registry,
             agents: self.agents,
+            recovery_cancels: self.recovery_cancels,
             register_tx,
         }
     }
@@ -450,10 +583,13 @@ async fn dispatch_one<Store: ActionStore>(
     // Mark Started in the store BEFORE pushing to the agent so a crash
     // between the two leaves us with at most a stale Started (recoverable)
     // rather than a phantom dispatch the store can't see.
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
     if let Err(e) = store
         .transition(
             cookie,
@@ -494,18 +630,22 @@ async fn dispatch_one<Store: ActionStore>(
     // this (Restore/Remove use the stored uuid from xattrs, not the path).
     // For Archive: needed to write the shadow namespace entry.
     // For Remove: needed to also remove the shadow entry when deleting the backend copy.
-    let lustre_path = if matches!(action.kind, ActionKind::Archive | ActionKind::Remove) && use_lustre_fid_path {
-        let fid_str = format!("{:#x}:{:#x}:{:#x}", action.fid.seq, action.fid.oid, action.fid.ver);
-        let mount_clone = mount.clone();
-        tokio::task::spawn_blocking(move || {
-            lustre_llapi::LiveCopytool::fid_to_path(&mount_clone, &fid_str)
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-    } else {
-        None
-    };
+    let lustre_path =
+        if matches!(action.kind, ActionKind::Archive | ActionKind::Remove) && use_lustre_fid_path {
+            let fid_str = format!(
+                "{:#x}:{:#x}:{:#x}",
+                action.fid.seq, action.fid.oid, action.fid.ver
+            );
+            let mount_clone = mount.clone();
+            tokio::task::spawn_blocking(move || {
+                lustre_llapi::LiveCopytool::fid_to_path(&mount_clone, &fid_str)
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+        } else {
+            None
+        };
 
     let dispatched = DispatchedAction {
         action: action.clone(),
@@ -628,9 +768,9 @@ fn spawn_status_drain<Store: ActionStore + 'static>(
                         let kind = action_kind.unwrap_or(ActionKind::Archive);
                         let restore_temp_path = {
                             let p = crate::copytool_recv::restore_temp_path(cookie);
-                            if p.exists() {
-                                let _ = std::fs::remove_file(&p);
-                            }
+                            // Unconditional delete — ENOENT is harmless and avoids
+                            // a TOCTOU race between exists() and remove_file().
+                            let _ = tokio::fs::remove_file(&p).await;
                             None
                         };
                         let _ = tx.0.try_send(ActionCompletion {

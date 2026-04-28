@@ -74,6 +74,13 @@ mod tests {
         assert_eq!(MoverError::Transient("x".into()).errno(), 11);
         assert_eq!(MoverError::Integrity("x".into()).errno(), 5);
         assert_eq!(MoverError::Other("x".into()).errno(), 5);
-        assert_eq!(MoverError::Backend { errno: 28, reason: "ENOSPC".into() }.errno(), 28);
+        assert_eq!(
+            MoverError::Backend {
+                errno: 28,
+                reason: "ENOSPC".into()
+            }
+            .errno(),
+            28
+        );
     }
 }

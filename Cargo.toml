@@ -11,8 +11,8 @@ members = [
     "crates/hsm-plugin-sdk",
     "crates/plugins/noop",
     "crates/plugins/terrasync",
-    "crates/plugins/nfs",
     "crates/hsmd",
+    "crates/hsmctl",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.
 exclude = ["spikes"]

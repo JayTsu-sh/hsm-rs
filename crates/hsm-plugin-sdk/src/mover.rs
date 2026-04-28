@@ -33,10 +33,7 @@ pub trait Mover: Send + Sync + 'static {
     /// 3. Call `ctx.check_cancel()?` at chunk boundaries.
     /// 4. Call `ctx.progress.flush().await` before returning success
     ///    so the final cumulative count lands.
-    fn archive(
-        &self,
-        ctx: ActionCtx,
-    ) -> impl Future<Output = MoverResult<BackendObject>> + Send;
+    fn archive(&self, ctx: ActionCtx) -> impl Future<Output = MoverResult<BackendObject>> + Send;
 
     /// Pull bytes from `obj` back into the Lustre file (at
     /// `ctx.write_path`). Returns `Ok(())` on success — the daemon

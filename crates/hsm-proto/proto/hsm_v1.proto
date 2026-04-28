@@ -115,3 +115,50 @@ service DataMover {
   // dial-up); having both produces a name collision.
   rpc Open(stream FromPlugin) returns (stream ToPlugin);
 }
+
+// ── Management interface (hsmctl) ────────────────────────────────────────
+
+// Summary of one connected agent.
+message CtlAgentInfo {
+  string          agent_id           = 1;
+  repeated uint32 archive_ids        = 2;
+  int64           registered_at_secs = 3;  // Unix seconds
+}
+
+// ── Status ────────────────────────────────────────────────────────────────
+message CtlStatusRequest  {}
+message CtlStatusResponse {
+  uint64              actions_waiting = 1;
+  uint64              actions_started = 2;
+  uint64              actions_total   = 3;
+  repeated CtlAgentInfo agents        = 4;
+}
+
+// ── ListAgents ────────────────────────────────────────────────────────────
+message CtlListAgentsRequest  {}
+message CtlListAgentsResponse { repeated CtlAgentInfo agents = 1; }
+
+// ── ListActions ───────────────────────────────────────────────────────────
+message CtlListActionsRequest {
+  string state_filter = 1;  // "" = all | "waiting" | "started"
+  uint32 archive_id   = 2;  // 0 = all archives
+}
+
+message CtlActionRecord {
+  fixed64 cookie     = 1;
+  string  fid        = 2;   // "[0xseq:0xoid:0xver]"
+  uint32  archive_id = 3;
+  string  kind       = 4;   // "archive" | "restore" | "remove" | "cancel"
+  string  state      = 5;   // "waiting" | "started" | "succeed" | "failed" | "canceled"
+  string  agent_id   = 6;   // empty when not started
+  uint64  progress   = 7;   // bytes advanced (cumulative)
+  int64   since_ms   = 8;   // started_at unix ms; 0 when not started
+}
+
+message CtlListActionsResponse { repeated CtlActionRecord actions = 1; }
+
+service HsmControl {
+  rpc Status     (CtlStatusRequest)      returns (CtlStatusResponse);
+  rpc ListAgents (CtlListAgentsRequest)  returns (CtlListAgentsResponse);
+  rpc ListActions(CtlListActionsRequest) returns (CtlListActionsResponse);
+}

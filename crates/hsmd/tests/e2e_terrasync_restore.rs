@@ -41,7 +41,11 @@ fn binary_path(name: &str) -> PathBuf {
     if let Ok(p) = std::env::var(&key) {
         return PathBuf::from(p);
     }
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     workspace_target_dir().join(profile).join(name)
 }
 
@@ -301,7 +305,9 @@ fn subprocess_archive_release_restore_remove_round_trip() {
                     .snapshot_log()
                     .iter()
                     .map(|l| strip_ansi(l))
-                    .any(|l| l.contains("hsmd.status") && l.contains("completed") && l.contains(&marker))
+                    .any(|l| {
+                        l.contains("hsmd.status") && l.contains("completed") && l.contains(&marker)
+                    })
             }),
             "{label}: no completion log for cookie {cookie:#x}; hsmd:\n{}\nplugin:\n{}",
             hsmd_log.snapshot_log().join("\n"),

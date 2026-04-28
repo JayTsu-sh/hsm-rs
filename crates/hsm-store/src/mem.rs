@@ -154,7 +154,10 @@ mod tests {
         let agent = AgentId::new("mover-0");
         s.transition(
             Cookie::new(1),
-            ArState::Started { agent: agent.clone(), since_unix_ms: 0 },
+            ArState::Started {
+                agent: agent.clone(),
+                since_unix_ms: 0,
+            },
         )
         .await
         .unwrap();
@@ -167,7 +170,9 @@ mod tests {
     async fn transition_from_terminal_is_rejected() {
         let s = MemStore::new();
         s.insert(record(1)).await.unwrap();
-        s.transition(Cookie::new(1), ArState::Succeed { rc: 0 }).await.unwrap();
+        s.transition(Cookie::new(1), ArState::Succeed { rc: 0 })
+            .await
+            .unwrap();
         let err = s
             .transition(Cookie::new(1), ArState::Waiting)
             .await
@@ -200,8 +205,12 @@ mod tests {
     async fn progress_advances_and_rejects_regression() {
         let s = MemStore::new();
         s.insert(record(1)).await.unwrap();
-        s.update_progress(Cookie::new(1), Extent::new(0, 4096)).await.unwrap();
-        s.update_progress(Cookie::new(1), Extent::new(4096, 4096)).await.unwrap();
+        s.update_progress(Cookie::new(1), Extent::new(0, 4096))
+            .await
+            .unwrap();
+        s.update_progress(Cookie::new(1), Extent::new(4096, 4096))
+            .await
+            .unwrap();
 
         let err = s
             .update_progress(Cookie::new(1), Extent::new(2048, 1024))
@@ -237,12 +246,24 @@ mod tests {
         s.insert(record(2)).await.unwrap();
         s.insert(record(3)).await.unwrap();
 
-        s.transition(Cookie::new(1), ArState::Started { agent: m0.clone(), since_unix_ms: 0 })
-            .await
-            .unwrap();
-        s.transition(Cookie::new(2), ArState::Started { agent: m1.clone(), since_unix_ms: 0 })
-            .await
-            .unwrap();
+        s.transition(
+            Cookie::new(1),
+            ArState::Started {
+                agent: m0.clone(),
+                since_unix_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+        s.transition(
+            Cookie::new(2),
+            ArState::Started {
+                agent: m1.clone(),
+                since_unix_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
         // 3 stays Waiting → not attributed to any agent.
 
         let m0_rows = s.list_by_agent(&m0).await.unwrap();

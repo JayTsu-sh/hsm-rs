@@ -57,6 +57,15 @@ pub struct HsmdConfig {
     /// dev / CI runs on ext4 / xfs / tmpfs.
     #[serde(default)]
     pub xattr: XattrCfg,
+
+    /// Path to the SQLite state database for crash-safe recovery.
+    /// When absent (the default), an in-memory store is used — fast but
+    /// loses all in-flight state on restart. Set this for any deployment
+    /// where `recover()` needs to replay persisted actions.
+    ///
+    /// Example: `store_path = "/var/lib/hsmd/state.db"`
+    #[serde(default)]
+    pub store_path: Option<std::path::PathBuf>,
 }
 
 /// xattr namespace selector — wraps [`crate::xattr_store::XattrNamespace`].
@@ -136,6 +145,11 @@ pub struct SchedulerCfg {
     pub tick_interval_ms: u64,
     /// Max dispatched assignments per tick.
     pub max_per_tick: usize,
+    /// Grace period in milliseconds: how long to wait for an agent to
+    /// reconnect and re-claim a `Started` action after a daemon restart
+    /// before rolling it back to `Waiting`. Defaults to 10 minutes.
+    #[serde(default = "default_grace_ms")]
+    pub grace_ms: u64,
 }
 
 impl Default for SchedulerCfg {
@@ -143,8 +157,13 @@ impl Default for SchedulerCfg {
         Self {
             tick_interval_ms: 50,
             max_per_tick: 32,
+            grace_ms: default_grace_ms(),
         }
     }
+}
+
+fn default_grace_ms() -> u64 {
+    600_000 // 10 minutes
 }
 
 /// Logging knobs.
@@ -246,6 +265,7 @@ impl HsmdConfig {
             xattr_namespace: Some(self.xattr.namespace.into()),
             use_lustre_fid_path: matches!(self.mode, Mode::Live),
             completion_tx: None, // wired by the binary after recv source construction
+            recovery_grace_period: Duration::from_millis(self.scheduler.grace_ms),
         }
     }
 }
@@ -291,7 +311,10 @@ mod tests {
         assert_eq!(cfg.mountpoint, PathBuf::from("/srv/lustre"));
         assert_eq!(cfg.scheduler.tick_interval_ms, 100);
         assert_eq!(cfg.scheduler.max_per_tick, 64);
-        assert_eq!(cfg.log.filter.as_deref(), Some("hsmd=debug,hsm_plugin_sdk=info"));
+        assert_eq!(
+            cfg.log.filter.as_deref(),
+            Some("hsmd=debug,hsm_plugin_sdk=info")
+        );
         assert_eq!(cfg.log.format, LogFormat::Json);
     }
 
@@ -310,7 +333,8 @@ mod tests {
 
     #[test]
     fn mock_action_jsonl_round_trip() {
-        let line = r#"{"cookie":171,"fid_seq":8589934593,"fid_oid":18,"archive_id":1,"kind":"archive"}"#;
+        let line =
+            r#"{"cookie":171,"fid_seq":8589934593,"fid_oid":18,"archive_id":1,"kind":"archive"}"#;
         let a: MockAction = serde_json::from_str(line).unwrap();
         assert_eq!(a.cookie, 171);
         assert_eq!(a.fid_seq, 0x2_0000_0001);

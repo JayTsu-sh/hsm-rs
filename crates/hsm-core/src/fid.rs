@@ -31,7 +31,11 @@ pub struct Fid {
 
 impl Fid {
     /// The all-zero FID. Lustre uses this as a sentinel for "no FID".
-    pub const ZERO: Self = Self { seq: 0, oid: 0, ver: 0 };
+    pub const ZERO: Self = Self {
+        seq: 0,
+        oid: 0,
+        ver: 0,
+    };
 
     /// Construct a FID from its three components.
     pub const fn new(seq: u64, oid: u32, ver: u32) -> Self {
@@ -79,11 +83,20 @@ impl FromStr for Fid {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Strip optional [ ... ] brackets.
-        let body = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(s);
+        let body = s
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(s);
         let mut parts = body.split(':');
-        let seq_s = parts.next().ok_or_else(|| FidParseError::BadShape(s.to_string()))?;
-        let oid_s = parts.next().ok_or_else(|| FidParseError::BadShape(s.to_string()))?;
-        let ver_s = parts.next().ok_or_else(|| FidParseError::BadShape(s.to_string()))?;
+        let seq_s = parts
+            .next()
+            .ok_or_else(|| FidParseError::BadShape(s.to_string()))?;
+        let oid_s = parts
+            .next()
+            .ok_or_else(|| FidParseError::BadShape(s.to_string()))?;
+        let ver_s = parts
+            .next()
+            .ok_or_else(|| FidParseError::BadShape(s.to_string()))?;
         if parts.next().is_some() {
             return Err(FidParseError::BadShape(s.to_string()));
         }
@@ -151,14 +164,23 @@ mod tests {
     #[test]
     fn rejects_bad_shape() {
         for bad in ["[0x1:0x2]", "[0x1:0x2:0x3:0x4]", "garbage", ""] {
-            assert!(matches!(bad.parse::<Fid>(), Err(FidParseError::BadShape(_))));
+            assert!(matches!(
+                bad.parse::<Fid>(),
+                Err(FidParseError::BadShape(_))
+            ));
         }
     }
 
     #[test]
     fn rejects_non_hex() {
         let res: Result<Fid, _> = "[0xZZ:0x12:0x0]".parse();
-        assert!(matches!(res, Err(FidParseError::BadHex { component: "seq", .. })));
+        assert!(matches!(
+            res,
+            Err(FidParseError::BadHex {
+                component: "seq",
+                ..
+            })
+        ));
     }
 
     #[test]

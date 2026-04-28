@@ -26,12 +26,12 @@ use std::time::Duration;
 
 use hsm_core::ArchiveId;
 use hsm_plugin_noop::NoopMover;
-use hsm_plugin_sdk::{run_with_channel, RunConfig};
+use hsm_plugin_sdk::{RunConfig, run_with_channel};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::net::UnixStream;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tonic::transport::Endpoint;
 use tower::service_fn;
 use tracing::{error, info, warn};
@@ -205,9 +205,15 @@ async fn main() -> std::process::ExitCode {
     let mover_for_run = mover.clone();
 
     // --- run the SDK loop in a task so we can race it against signals ------
-    let archive_ids: Vec<ArchiveId> = cfg.archive_ids.iter().copied().map(ArchiveId::new).collect();
+    let archive_ids: Vec<ArchiveId> = cfg
+        .archive_ids
+        .iter()
+        .copied()
+        .map(ArchiveId::new)
+        .collect();
     let run_cfg = RunConfig::new(cfg.agent_id.clone(), archive_ids);
-    let run_task = tokio::spawn(async move { run_with_channel(channel, mover_for_run, run_cfg).await });
+    let run_task =
+        tokio::spawn(async move { run_with_channel(channel, mover_for_run, run_cfg).await });
 
     // --- shutdown signal ----------------------------------------------------
     let signal_task = tokio::spawn(wait_for_shutdown_signal());

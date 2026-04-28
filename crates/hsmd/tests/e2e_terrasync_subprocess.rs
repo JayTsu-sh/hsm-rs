@@ -38,7 +38,11 @@ fn binary_path(name: &str) -> PathBuf {
     if let Ok(p) = std::env::var(&key) {
         return PathBuf::from(p);
     }
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     workspace_target_dir().join(profile).join(name)
 }
 
@@ -302,10 +306,9 @@ fn subprocess_archive_moves_bytes_via_terrasync() {
     let cookie_marker = format!("cookie={cookie:#x}");
     assert!(
         poll_until(Duration::from_secs(15), || {
-            hsmd.snapshot_log()
-                .iter()
-                .map(|l| strip_ansi(l))
-                .any(|l| l.contains("hsmd.status") && l.contains("completed") && l.contains(&cookie_marker))
+            hsmd.snapshot_log().iter().map(|l| strip_ansi(l)).any(|l| {
+                l.contains("hsmd.status") && l.contains("completed") && l.contains(&cookie_marker)
+            })
         }),
         "no completion log for cookie {cookie} ({cookie_marker}); hsmd logs:\n{}\nplugin logs:\n{}",
         hsmd.snapshot_log().join("\n"),
