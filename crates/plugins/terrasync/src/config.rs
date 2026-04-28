@@ -158,6 +158,41 @@ impl BackendUrl {
     }
 }
 
+/// Replace the userinfo component of a URL with `***` so credentials
+/// never appear in logs.
+///
+/// ```
+/// # use hsm_plugin_terrasync::redact_url;
+/// assert_eq!(
+///     redact_url("s3+https://ak:sk@bucket.host:9090/prefix"),
+///     "s3+https://***@bucket.host:9090/prefix",
+/// );
+/// assert_eq!(redact_url("file:///srv/hsm"), "file:///srv/hsm");
+/// assert_eq!(redact_url("nfs://server/export"), "nfs://server/export");
+/// ```
+pub fn redact_url(url: &str) -> String {
+    // Locate "://" to find where the authority section starts.
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_owned();
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    // Authority ends at the first '/' (or end of string).
+    let authority_len = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_len];
+    // Only redact if there is a '@' inside the authority — that means
+    // there's userinfo (user:password) before the host.
+    if let Some(at) = authority.find('@') {
+        let _ = at;
+        format!(
+            "{}://***@{}",
+            &url[..scheme_end],
+            &after_scheme[authority.find('@').unwrap() + 1..]
+        )
+    } else {
+        url.to_owned()
+    }
+}
+
 /// Knows how to map an `(archive_id, fid)` pair to a (path, URL) pair
 /// inside an archive root, and back.
 #[derive(Clone, Debug)]

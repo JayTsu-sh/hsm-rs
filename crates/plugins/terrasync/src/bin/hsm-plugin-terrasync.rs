@@ -42,7 +42,7 @@ use std::sync::Arc;
 use data_mover::{LocalStorage, StorageEnum};
 use hsm_core::ArchiveId;
 use hsm_plugin_sdk::{RunConfig, run_with_channel};
-use hsm_plugin_terrasync::{ArchiveLayout, BackendScheme, BackendUrl, TerrasyncMover};
+use hsm_plugin_terrasync::{redact_url, ArchiveLayout, BackendScheme, BackendUrl, TerrasyncMover};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use thiserror::Error;
@@ -162,7 +162,7 @@ async fn main() -> std::process::ExitCode {
         socket = %cfg.socket_path.display(),
         agent = %cfg.agent_id,
         archives = ?cfg.archive_ids,
-        archive_root_url = %cfg.archive_root_url,
+        archive_root_url = %redact_url(&cfg.archive_root_url),
         "starting"
     );
 
@@ -171,14 +171,12 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
 
-    // Parse the URL up front so we fail at startup, not on the first
-    // dispatched action.
     let parsed = match BackendUrl::parse(&cfg.archive_root_url) {
         Ok(p) => p,
         Err(e) => {
             error!(
                 target: "hsm.plugin.terrasync",
-                url = %cfg.archive_root_url, error = %e,
+                url = %redact_url(&cfg.archive_root_url), error = %e,
                 "archive_root_url parse failed"
             );
             return std::process::ExitCode::from(2);
@@ -190,7 +188,7 @@ async fn main() -> std::process::ExitCode {
         Err(e) => {
             error!(
                 target: "hsm.plugin.terrasync",
-                url = %cfg.archive_root_url, error = %e,
+                url = %redact_url(&cfg.archive_root_url), error = %e,
                 "destination storage construction failed"
             );
             return std::process::ExitCode::from(2);
