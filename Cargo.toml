@@ -11,6 +11,7 @@ members = [
     "crates/hsm-plugin-sdk",
     "crates/plugins/noop",
     "crates/plugins/terrasync",
+    "crates/plugins/nfs",
     "crates/hsmd",
 ]
 # spikes/ are throwaway validation projects with their own [workspace] roots.
@@ -50,6 +51,9 @@ hex = "0.4"
 [patch.crates-io]
 nfs-rs = { git = "https://github.com/JayTsu-sh/nfs-rs.git" }
 smb = { git = "https://github.com/JayTsu-sh/smb-rs.git" }
+
+[patch."https://github.com/JayTsu-sh/data-mover-rs.git"]
+data-mover = { path = "../data-mover-rs" }
 
 [workspace.lints.rust]
 # Production crates should mark unsafe explicitly. lustre-sys is exempt

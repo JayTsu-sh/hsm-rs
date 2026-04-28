@@ -1,0 +1,32 @@
+[package]
+name = "hsm-plugin-nfs"
+description = "hsm-rs Mover backed by data-mover-rs NFSStorage (NFSv3/v4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "hsm-plugin-nfs"
+path = "src/main.rs"
+
+[dependencies]
+hsm-core = { path = "../../hsm-core" }
+hsm-plugin-sdk = { path = "../../hsm-plugin-sdk" }
+hsm-plugin-terrasync = { path = "../terrasync" }
+data-mover = { git = "https://github.com/JayTsu-sh/data-mover-rs.git" }
+
+serde = { workspace = true }
+thiserror = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "net", "signal", "time"] }
+tonic = { workspace = true }
+toml = "0.8"
+tower = "0.5"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

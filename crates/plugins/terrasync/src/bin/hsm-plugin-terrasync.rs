@@ -32,7 +32,7 @@ use hsm_plugin_sdk::{RunConfig, run_with_channel};
 use hsm_plugin_terrasync::{ArchiveLayout, BackendScheme, BackendUrl, TerrasyncMover};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
-use storage_v2::{LocalStorage, StorageEnum, create_storage};
+use data_mover::{LocalStorage, StorageEnum, create_nfs_storage_ensuring_dir, create_storage};
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
@@ -298,9 +298,20 @@ async fn build_mover(raw_url: &str, parsed: &BackendUrl) -> Result<TerrasyncMove
             let dst = Arc::new(storage);
             Ok(TerrasyncMover::with_dst(dst, layout))
         }
-        BackendScheme::Nfs | BackendScheme::Cifs => Err(format!(
-            "scheme {:?} not yet implemented; use file:// or s3://",
-            parsed.scheme.as_str()
+        BackendScheme::Nfs => {
+            // create_nfs_storage_ensuring_dir mounts the NFS export and
+            // creates the root_dir subdirectory if it does not yet exist.
+            let storage: StorageEnum = create_nfs_storage_ensuring_dir(raw_url, None)
+                .await
+                .map_err(|e| format!("NFS storage init failed for {raw_url}: {e}"))?;
+            // ArchiveLayout root is "/" — NFSStorage already anchors paths
+            // at the root_dir specified in the URL (e.g. ":hsm-archive").
+            let layout = ArchiveLayout::new(std::path::PathBuf::from("/"));
+            let dst = Arc::new(storage);
+            Ok(TerrasyncMover::with_dst(dst, layout))
+        }
+        BackendScheme::Cifs => Err(format!(
+            "scheme cifs not yet implemented; use file://, s3://, or nfs://"
         )),
     }
 }
