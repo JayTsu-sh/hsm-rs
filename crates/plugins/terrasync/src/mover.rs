@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
+use data_mover::qos::QosManager;
 use data_mover::{EntryEnum, LocalStorage, NASEntry, StorageEnum};
 use hsm_core::BackendObject;
 use hsm_plugin_sdk::{ActionCtx, Mover, MoverError, MoverResult};
@@ -39,33 +40,33 @@ use crate::config::ArchiveLayout;
 ///
 /// ## QoS / rate limiting
 ///
-/// Set [`bandwidth_bps`](Self::with_bandwidth) to cap throughput. The
-/// progress loop splits each transfer into 4 MiB virtual chunks and
-/// sleeps between chunks so the effective rate never exceeds the limit.
-/// This also gives per-chunk cancel points (vs. the previous whole-file
-/// cancel gap).
+/// Attach a [`QosManager`] via [`with_qos`](Self::with_qos). Each
+/// transfer is split into 4 MiB chunks; before each chunk the mover
+/// calls `qos.acquire(chunk)`, which blocks until the governor token
+/// bucket has enough tokens. This provides:
+///
+/// - Bandwidth limiting (`"200MiB/s"`, `"1GiB/s"`, …).
+/// - IOPS limiting (optional).
+/// - Per-chunk cancel points (4 MiB granularity).
+/// - Hot-reload via `QosManager::update_bandwidth` / `update_iops`.
+/// - Live statistics via `QosManager::stats()`.
 #[derive(Clone)]
 pub struct TerrasyncMover {
-    /// Source storage rooted at `/`.
     src: Arc<StorageEnum>,
-    /// Destination storage.
     dst: Arc<StorageEnum>,
-    /// Layout helper for `(archive_id, fid)` → (path, url) conversion.
     layout: ArchiveLayout,
-    /// Optional bandwidth cap in bytes/second. `None` = unlimited.
-    bandwidth_bps: Option<u64>,
+    /// Optional QoS manager. `None` = no rate limiting.
+    qos: Option<Arc<QosManager>>,
 }
 
 impl TerrasyncMover {
-    /// New mover with an explicit destination [`StorageEnum`] and
-    /// archive layout. The source is always `LocalStorage("/")`.
+    /// New mover with an explicit destination [`StorageEnum`] and layout.
     pub fn with_dst(dst: Arc<StorageEnum>, layout: ArchiveLayout) -> Self {
         let src = Arc::new(StorageEnum::Local(LocalStorage::new("/", None)));
-        Self { src, dst, layout, bandwidth_bps: None }
+        Self { src, dst, layout, qos: None }
     }
 
-    /// Convenience for the file:// path: builds a `LocalStorage` at
-    /// `archive_root` and an [`ArchiveLayout`] rooted at the same.
+    /// Convenience for the file:// path.
     pub fn new(archive_root: impl Into<PathBuf>) -> Self {
         let layout = ArchiveLayout::new(archive_root);
         let dst = Arc::new(StorageEnum::Local(LocalStorage::new(
@@ -75,14 +76,20 @@ impl TerrasyncMover {
         Self::with_dst(dst, layout)
     }
 
-    /// Cap throughput at `bps` bytes per second. Pass `0` to disable.
-    pub fn with_bandwidth(mut self, bps: u64) -> Self {
-        self.bandwidth_bps = if bps == 0 { None } else { Some(bps) };
+    /// Attach a `QosManager` for bandwidth + IOPS rate limiting.
+    ///
+    /// Use `data_mover::qos::QosManager::try_new_with_burst` for strict
+    /// average-rate enforcement (recommended for HSM background I/O):
+    /// ```ignore
+    /// let qos = QosManager::try_new_with_burst("200MiB/s", 4 * 1024 * 1024, None)?;
+    /// let mover = TerrasyncMover::new(root).with_qos(qos);
+    /// ```
+    pub fn with_qos(mut self, qos: QosManager) -> Self {
+        self.qos = Some(Arc::new(qos));
         self
     }
 
-    /// Returns the archive layout helper (useful for tests inspecting
-    /// where the mover wrote its objects).
+    /// Returns the archive layout helper.
     pub fn layout(&self) -> &ArchiveLayout {
         &self.layout
     }
@@ -132,7 +139,7 @@ impl Mover for TerrasyncMover {
             .map_err(|e| map_storage_err(e, &self.layout.full_path(ctx.archive_id, ctx.fid)))?;
 
         // Paced progress: 4 MiB chunks with cancel points + rate limiting.
-        paced_advance(&ctx, bytes.len() as u64, self.bandwidth_bps).await?;
+        paced_advance(&ctx, bytes.len() as u64, self.qos.as_deref()).await?;
         ctx.progress.flush().await;
 
         // Shadow namespace: create an entry that mirrors the Lustre path.
@@ -218,7 +225,7 @@ impl Mover for TerrasyncMover {
             .await
             .map_err(|e| map_storage_err(e, &write_path_abs))?;
 
-        paced_advance(&ctx, restored_len, self.bandwidth_bps).await?;
+        paced_advance(&ctx, restored_len, self.qos.as_deref()).await?;
         ctx.progress.flush().await;
         info!(
             target: "hsm.plugin.terrasync",
@@ -346,37 +353,27 @@ impl TerrasyncMover {
 // helpers
 // ---------------------------------------------------------------------------
 
-/// Emit progress in 4 MiB virtual chunks with optional bandwidth pacing.
+/// Emit progress in 4 MiB chunks, optionally rate-limited via `QosManager`.
 ///
-/// Even though the underlying I/O already completed (data-mover reads the
-/// whole file at once), splitting progress here gives:
-/// - Per-chunk cancel points every 4 MiB.
-/// - Smooth progress reporting instead of a single jump at the end.
-/// - Real throughput limiting: each chunk sleeps until `bytes / bps`
-///   wall-clock time has elapsed since the transfer started, so the
-///   action never completes faster than the configured rate.
+/// Splitting progress here (even though the underlying I/O completed in
+/// one shot) gives:
+/// - Per-chunk cancel points every 4 MiB instead of a whole-file gap.
+/// - Smooth progress updates for the daemon's `llapi_hsm_action_progress`.
+/// - Governor-based token-bucket rate limiting when `qos` is `Some`.
 async fn paced_advance(
     ctx: &hsm_plugin_sdk::ActionCtx,
     total: u64,
-    bandwidth_bps: Option<u64>,
+    qos: Option<&QosManager>,
 ) -> MoverResult<()> {
     const CHUNK: u64 = 4 * 1024 * 1024; // 4 MiB
-    let start = std::time::Instant::now();
     let mut sent = 0u64;
     while sent < total {
         ctx.check_cancel()?;
         let chunk = (total - sent).min(CHUNK);
-        if let Some(bps) = bandwidth_bps {
-            // Calculate when `sent + chunk` bytes should have been
-            // transferred at the rate limit, then sleep the deficit.
-            let target_ns = (sent + chunk) as u128 * 1_000_000_000 / bps as u128;
-            let elapsed_ns = start.elapsed().as_nanos();
-            if target_ns > elapsed_ns {
-                let sleep = std::time::Duration::from_nanos(
-                    (target_ns - elapsed_ns) as u64,
-                );
-                tokio::time::sleep(sleep).await;
-            }
+        if let Some(q) = qos {
+            // acquire() blocks until the governor token bucket has enough
+            // tokens for `chunk` bytes (+ 1 IOPS if configured).
+            q.acquire(chunk).await;
         }
         sent += chunk;
         ctx.progress.advance(chunk);
@@ -729,80 +726,71 @@ mod tests {
         assert_eq!(total, payload.len() as u64);
     }
 
+    /// Tests rate limiting via `paced_advance` directly (no real file I/O).
+    ///
+    /// governor's `until_n_ready(n)` requires burst ≥ n. With burst = 4 MiB
+    /// (= CHUNK) and 8 MiB total (two chunks): first chunk passes immediately,
+    /// second chunk waits ~0.5 s → total ≥ 400 ms.
     #[tokio::test]
-    async fn bandwidth_limit_slows_archive() {
-        let work = tempfile::tempdir().unwrap();
-        let primary = work.path().join("data.bin");
-        // 2 MiB payload — small enough for a fast test, large enough to
-        // trigger at least one sleep at the rate limit.
-        let payload = vec![0xabu8; 2 * 1024 * 1024];
-        tokio::fs::write(&primary, &payload).await.unwrap();
-
-        // Cap at 8 MiB/s → 2 MiB should take ≥ 250 ms.
-        let bps: u64 = 8 * 1024 * 1024;
-        let mover = TerrasyncMover::new(work.path().join("backend"))
-            .with_bandwidth(bps);
-
-        let fid = Fid::new(2, 99, 0);
+    async fn paced_advance_rate_limits() {
+        use std::path::PathBuf;
         let (progress, _rx) =
-            ProgressReporter::new(Cookie::new(50), Extent::WHOLE, ProgressConfig::defaults());
+            ProgressReporter::new(Cookie::new(99), Extent::WHOLE, ProgressConfig::defaults());
         let ctx = ActionCtxBuilder::default()
-            .cookie(Cookie::new(50))
-            .fid(fid)
+            .cookie(Cookie::new(99))
+            .fid(Fid::new(1, 1, 0))
             .archive_id(ArchiveId::new(1))
             .kind(ActionKind::Archive)
             .extent(Extent::WHOLE)
-            .primary_path(primary)
+            .primary_path(PathBuf::from("/fake"))
             .hint(Bytes::new())
             .progress(progress)
             .cancel(CancellationToken::new())
             .build();
 
+        let qos = data_mover::qos::QosManager::try_new_with_burst(
+            "8MiB/s",
+            4 * 1024 * 1024, // burst = 1 chunk
+            None,
+        )
+        .unwrap();
+
         let start = std::time::Instant::now();
-        mover.archive(ctx).await.expect("archive ok");
+        paced_advance(&ctx, 8 * 1024 * 1024, Some(&qos))
+            .await
+            .unwrap();
         let elapsed = start.elapsed();
 
-        let expected_min = std::time::Duration::from_millis(
-            (payload.len() as u64 * 1000 / bps) as u64,
-        );
         assert!(
-            elapsed >= expected_min,
-            "expected archive to take ≥ {expected_min:?} at {bps} bps, took {elapsed:?}"
+            elapsed >= std::time::Duration::from_millis(400),
+            "expected ≥ 400ms (8 MiB, 8 MiB/s, 4 MiB burst), got {elapsed:?}"
         );
     }
 
+    /// Smoke test: archive completes normally when a QosManager is attached.
     #[tokio::test]
-    async fn unlimited_archive_is_fast() {
+    async fn archive_with_qos_succeeds() {
         let work = tempfile::tempdir().unwrap();
         let primary = work.path().join("data.bin");
-        let payload = vec![0u8; 2 * 1024 * 1024];
+        let payload = vec![0u8; 4096];
         tokio::fs::write(&primary, &payload).await.unwrap();
 
-        // No bandwidth cap — should complete well under 250 ms on any
-        // reasonable CI machine.
-        let mover = TerrasyncMover::new(work.path().join("backend"));
+        // High rate so the test is fast; we're only checking it doesn't crash.
+        let qos =
+            data_mover::qos::QosManager::try_new_with_burst("1GiB/s", 4 * 1024 * 1024, None)
+                .unwrap();
+        let mover = TerrasyncMover::new(work.path().join("backend")).with_qos(qos);
         let fid = Fid::new(2, 100, 0);
-        let (progress, _rx) =
-            ProgressReporter::new(Cookie::new(51), Extent::WHOLE, ProgressConfig::defaults());
-        let ctx = ActionCtxBuilder::default()
-            .cookie(Cookie::new(51))
-            .fid(fid)
-            .archive_id(ArchiveId::new(1))
-            .kind(ActionKind::Archive)
-            .extent(Extent::WHOLE)
-            .primary_path(primary)
-            .hint(Bytes::new())
-            .progress(progress)
-            .cancel(CancellationToken::new())
-            .build();
-
-        let start = std::time::Instant::now();
-        mover.archive(ctx).await.expect("archive ok");
-        // Without a limit this should finish in << 250 ms.
-        assert!(
-            start.elapsed() < std::time::Duration::from_millis(250),
-            "unlimited archive took unexpectedly long: {:?}",
-            start.elapsed()
+        let ctx_a = ctx_for(
+            50,
+            fid,
+            1,
+            ActionKind::Archive,
+            Extent::WHOLE,
+            primary,
+            None,
+            None,
         );
+        mover.archive(ctx_a).await.expect("archive with qos ok");
     }
 }

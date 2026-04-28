@@ -39,6 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use data_mover::qos::QosManager;
 use data_mover::{LocalStorage, StorageEnum};
 use hsm_core::ArchiveId;
 use hsm_plugin_sdk::{RunConfig, run_with_channel};
@@ -82,17 +83,41 @@ fn parse_args() -> Result<Args, String> {
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct QosConfig {
-    /// Bandwidth cap in MiB/s per action. `0` or absent = unlimited.
-    ///
-    /// Example: `bandwidth_mbps = 200` limits each archive/restore to
-    /// 200 MiB/s, preventing a single plugin from saturating the link.
+    /// Bandwidth cap per action, e.g. `"200MiB/s"`, `"1GiB/s"`.
+    /// Absent or empty string = unlimited.
+    /// Uses data-mover's `parse_bandwidth_string` format.
     #[serde(default)]
-    bandwidth_mbps: u64,
+    bandwidth: Option<String>,
+
+    /// IOPS cap per action. `0` or absent = unlimited.
+    #[serde(default)]
+    iops: Option<u32>,
 }
 
 impl QosConfig {
-    fn bandwidth_bps(&self) -> u64 {
-        self.bandwidth_mbps.saturating_mul(1024 * 1024)
+    /// Build a `QosManager` from this config, or `None` if both limits
+    /// are absent. Uses `try_new_with_burst` so that the burst window
+    /// is one chunk (4 MiB) — strict average-rate enforcement, no
+    /// 1-second burst surprises on small files.
+    fn build(&self) -> Result<Option<QosManager>, String> {
+        let has_bw = self.bandwidth.as_deref().is_some_and(|s| !s.is_empty());
+        let has_iops = self.iops.is_some_and(|v| v > 0);
+        if !has_bw && !has_iops {
+            return Ok(None);
+        }
+        let qos = match self.bandwidth.as_deref().filter(|s| !s.is_empty()) {
+            Some(bw) => {
+                // 4 MiB burst → after the first chunk the rate is strictly enforced.
+                QosManager::try_new_with_burst(bw, 4 * 1024 * 1024, self.iops)
+                    .map_err(|e| format!("qos.bandwidth {bw:?}: {e}"))?
+            }
+            None => {
+                // IOPS-only — no bandwidth string, so use try_new with no bandwidth.
+                QosManager::try_new(None, 1.0, self.iops)
+                    .map_err(|e| format!("qos.iops: {e}"))?
+            }
+        };
+        Ok(Some(qos))
     }
 }
 
@@ -203,7 +228,24 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let mover = match build_mover(&cfg.archive_root_url, &parsed, cfg.qos.bandwidth_bps()).await {
+    let qos = match cfg.qos.build() {
+        Ok(q) => q,
+        Err(e) => {
+            error!(target: "hsm.plugin.terrasync", error = %e, "qos config invalid");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if let Some(ref q) = qos {
+        let cfg = q.config();
+        info!(
+            target: "hsm.plugin.terrasync",
+            bandwidth = ?cfg.bandwidth,
+            iops = ?cfg.iops,
+            "QoS enabled"
+        );
+    }
+
+    let mover = match build_mover(&cfg.archive_root_url, &parsed, qos).await {
         Ok(m) => Arc::new(m),
         Err(e) => {
             error!(
@@ -276,11 +318,10 @@ async fn main() -> std::process::ExitCode {
     exit
 }
 
-/// Dispatch to the scheme-specific mover constructor, then apply QoS.
 async fn build_mover(
     raw_url: &str,
     parsed: &BackendUrl,
-    bandwidth_bps: u64,
+    qos: Option<QosManager>,
 ) -> Result<TerrasyncMover, String> {
     let mover = match parsed.scheme {
         BackendScheme::File => build_file_mover(parsed)?,
@@ -292,7 +333,10 @@ async fn build_mover(
             );
         }
     };
-    Ok(mover.with_bandwidth(bandwidth_bps))
+    Ok(match qos {
+        Some(q) => mover.with_qos(q),
+        None => mover,
+    })
 }
 
 /// `file://<path>` — local POSIX filesystem. Always compiled in.
