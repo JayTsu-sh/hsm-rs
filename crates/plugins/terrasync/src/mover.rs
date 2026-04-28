@@ -36,15 +36,24 @@ use crate::config::ArchiveLayout;
 /// `LocalStorage("/")` (the Lustre mountpoint is just a sub-path).
 /// `dst` is supplied by the caller — file:// in M3a, S3 / NFS / CIFS
 /// pluggable in M3b without touching mover internals.
+///
+/// ## QoS / rate limiting
+///
+/// Set [`bandwidth_bps`](Self::with_bandwidth) to cap throughput. The
+/// progress loop splits each transfer into 4 MiB virtual chunks and
+/// sleeps between chunks so the effective rate never exceeds the limit.
+/// This also gives per-chunk cancel points (vs. the previous whole-file
+/// cancel gap).
 #[derive(Clone)]
 pub struct TerrasyncMover {
-    /// Source storage rooted at `/` so any absolute primary path
-    /// resolves as a relative path from `/`.
+    /// Source storage rooted at `/`.
     src: Arc<StorageEnum>,
-    /// Destination storage. Backend-agnostic; constructor's choice.
+    /// Destination storage.
     dst: Arc<StorageEnum>,
     /// Layout helper for `(archive_id, fid)` → (path, url) conversion.
     layout: ArchiveLayout,
+    /// Optional bandwidth cap in bytes/second. `None` = unlimited.
+    bandwidth_bps: Option<u64>,
 }
 
 impl TerrasyncMover {
@@ -52,7 +61,7 @@ impl TerrasyncMover {
     /// archive layout. The source is always `LocalStorage("/")`.
     pub fn with_dst(dst: Arc<StorageEnum>, layout: ArchiveLayout) -> Self {
         let src = Arc::new(StorageEnum::Local(LocalStorage::new("/", None)));
-        Self { src, dst, layout }
+        Self { src, dst, layout, bandwidth_bps: None }
     }
 
     /// Convenience for the file:// path: builds a `LocalStorage` at
@@ -64,6 +73,12 @@ impl TerrasyncMover {
             None,
         )));
         Self::with_dst(dst, layout)
+    }
+
+    /// Cap throughput at `bps` bytes per second. Pass `0` to disable.
+    pub fn with_bandwidth(mut self, bps: u64) -> Self {
+        self.bandwidth_bps = if bps == 0 { None } else { Some(bps) };
+        self
     }
 
     /// Returns the archive layout helper (useful for tests inspecting
@@ -106,17 +121,18 @@ impl Mover for TerrasyncMover {
             .await
             .map_err(|e| map_storage_err(e, &primary))?;
         ctx.check_cancel()?;
-        ctx.progress.advance(bytes.len() as u64);
 
         let hash = blake3_32(&bytes);
 
         let dst_relative = ArchiveLayout::relative_path(ctx.archive_id, ctx.fid);
         let dst_entry = synth_dest_entry(dst_relative, bytes.len() as u64);
 
-        StorageEnum::write_file_from_bytes(&self.dst, &dst_entry, bytes)
+        StorageEnum::write_file_from_bytes(&self.dst, &dst_entry, bytes.clone())
             .await
             .map_err(|e| map_storage_err(e, &self.layout.full_path(ctx.archive_id, ctx.fid)))?;
 
+        // Paced progress: 4 MiB chunks with cancel points + rate limiting.
+        paced_advance(&ctx, bytes.len() as u64, self.bandwidth_bps).await?;
         ctx.progress.flush().await;
 
         // Shadow namespace: create an entry that mirrors the Lustre path.
@@ -173,7 +189,6 @@ impl Mover for TerrasyncMover {
             .await
             .map_err(|e| map_storage_err(e, &backend_relative))?;
         ctx.check_cancel()?;
-        ctx.progress.advance(bytes.len() as u64);
 
         let actual = blake3_32(&bytes);
         if actual != obj.hash {
@@ -198,10 +213,12 @@ impl Mover for TerrasyncMover {
         let write_relative = strip_root(&write_path_abs)?;
         let write_entry = synth_dest_entry(write_relative, bytes.len() as u64);
 
+        let restored_len = bytes.len() as u64;
         StorageEnum::write_file_from_bytes(&self.src, &write_entry, bytes)
             .await
             .map_err(|e| map_storage_err(e, &write_path_abs))?;
 
+        paced_advance(&ctx, restored_len, self.bandwidth_bps).await?;
         ctx.progress.flush().await;
         info!(
             target: "hsm.plugin.terrasync",
@@ -328,6 +345,44 @@ impl TerrasyncMover {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Emit progress in 4 MiB virtual chunks with optional bandwidth pacing.
+///
+/// Even though the underlying I/O already completed (data-mover reads the
+/// whole file at once), splitting progress here gives:
+/// - Per-chunk cancel points every 4 MiB.
+/// - Smooth progress reporting instead of a single jump at the end.
+/// - Real throughput limiting: each chunk sleeps until `bytes / bps`
+///   wall-clock time has elapsed since the transfer started, so the
+///   action never completes faster than the configured rate.
+async fn paced_advance(
+    ctx: &hsm_plugin_sdk::ActionCtx,
+    total: u64,
+    bandwidth_bps: Option<u64>,
+) -> MoverResult<()> {
+    const CHUNK: u64 = 4 * 1024 * 1024; // 4 MiB
+    let start = std::time::Instant::now();
+    let mut sent = 0u64;
+    while sent < total {
+        ctx.check_cancel()?;
+        let chunk = (total - sent).min(CHUNK);
+        if let Some(bps) = bandwidth_bps {
+            // Calculate when `sent + chunk` bytes should have been
+            // transferred at the rate limit, then sleep the deficit.
+            let target_ns = (sent + chunk) as u128 * 1_000_000_000 / bps as u128;
+            let elapsed_ns = start.elapsed().as_nanos();
+            if target_ns > elapsed_ns {
+                let sleep = std::time::Duration::from_nanos(
+                    (target_ns - elapsed_ns) as u64,
+                );
+                tokio::time::sleep(sleep).await;
+            }
+        }
+        sent += chunk;
+        ctx.progress.advance(chunk);
+    }
+    Ok(())
+}
 
 fn absolute(p: &Path) -> MoverResult<PathBuf> {
     if p.is_absolute() {
@@ -672,5 +727,82 @@ mod tests {
             }
         }
         assert_eq!(total, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn bandwidth_limit_slows_archive() {
+        let work = tempfile::tempdir().unwrap();
+        let primary = work.path().join("data.bin");
+        // 2 MiB payload — small enough for a fast test, large enough to
+        // trigger at least one sleep at the rate limit.
+        let payload = vec![0xabu8; 2 * 1024 * 1024];
+        tokio::fs::write(&primary, &payload).await.unwrap();
+
+        // Cap at 8 MiB/s → 2 MiB should take ≥ 250 ms.
+        let bps: u64 = 8 * 1024 * 1024;
+        let mover = TerrasyncMover::new(work.path().join("backend"))
+            .with_bandwidth(bps);
+
+        let fid = Fid::new(2, 99, 0);
+        let (progress, _rx) =
+            ProgressReporter::new(Cookie::new(50), Extent::WHOLE, ProgressConfig::defaults());
+        let ctx = ActionCtxBuilder::default()
+            .cookie(Cookie::new(50))
+            .fid(fid)
+            .archive_id(ArchiveId::new(1))
+            .kind(ActionKind::Archive)
+            .extent(Extent::WHOLE)
+            .primary_path(primary)
+            .hint(Bytes::new())
+            .progress(progress)
+            .cancel(CancellationToken::new())
+            .build();
+
+        let start = std::time::Instant::now();
+        mover.archive(ctx).await.expect("archive ok");
+        let elapsed = start.elapsed();
+
+        let expected_min = std::time::Duration::from_millis(
+            (payload.len() as u64 * 1000 / bps) as u64,
+        );
+        assert!(
+            elapsed >= expected_min,
+            "expected archive to take ≥ {expected_min:?} at {bps} bps, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlimited_archive_is_fast() {
+        let work = tempfile::tempdir().unwrap();
+        let primary = work.path().join("data.bin");
+        let payload = vec![0u8; 2 * 1024 * 1024];
+        tokio::fs::write(&primary, &payload).await.unwrap();
+
+        // No bandwidth cap — should complete well under 250 ms on any
+        // reasonable CI machine.
+        let mover = TerrasyncMover::new(work.path().join("backend"));
+        let fid = Fid::new(2, 100, 0);
+        let (progress, _rx) =
+            ProgressReporter::new(Cookie::new(51), Extent::WHOLE, ProgressConfig::defaults());
+        let ctx = ActionCtxBuilder::default()
+            .cookie(Cookie::new(51))
+            .fid(fid)
+            .archive_id(ArchiveId::new(1))
+            .kind(ActionKind::Archive)
+            .extent(Extent::WHOLE)
+            .primary_path(primary)
+            .hint(Bytes::new())
+            .progress(progress)
+            .cancel(CancellationToken::new())
+            .build();
+
+        let start = std::time::Instant::now();
+        mover.archive(ctx).await.expect("archive ok");
+        // Without a limit this should finish in << 250 ms.
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(250),
+            "unlimited archive took unexpectedly long: {:?}",
+            start.elapsed()
+        );
     }
 }

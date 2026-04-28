@@ -79,6 +79,23 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args { config_path })
 }
 
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct QosConfig {
+    /// Bandwidth cap in MiB/s per action. `0` or absent = unlimited.
+    ///
+    /// Example: `bandwidth_mbps = 200` limits each archive/restore to
+    /// 200 MiB/s, preventing a single plugin from saturating the link.
+    #[serde(default)]
+    bandwidth_mbps: u64,
+}
+
+impl QosConfig {
+    fn bandwidth_bps(&self) -> u64 {
+        self.bandwidth_mbps.saturating_mul(1024 * 1024)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PluginConfig {
@@ -91,6 +108,9 @@ struct PluginConfig {
     archive_root_url: String,
     #[serde(default)]
     log_filter: Option<String>,
+    /// Optional QoS / rate-limiting knobs.
+    #[serde(default)]
+    qos: QosConfig,
 }
 
 #[derive(Debug, Error)]
@@ -183,7 +203,7 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let mover = match build_mover(&cfg.archive_root_url, &parsed).await {
+    let mover = match build_mover(&cfg.archive_root_url, &parsed, cfg.qos.bandwidth_bps()).await {
         Ok(m) => Arc::new(m),
         Err(e) => {
             error!(
@@ -256,16 +276,23 @@ async fn main() -> std::process::ExitCode {
     exit
 }
 
-/// Dispatch to the scheme-specific mover constructor.
-async fn build_mover(raw_url: &str, parsed: &BackendUrl) -> Result<TerrasyncMover, String> {
-    match parsed.scheme {
-        BackendScheme::File => build_file_mover(parsed),
-        BackendScheme::S3 => build_s3_mover(raw_url, parsed).await,
-        BackendScheme::Nfs => build_nfs_mover(raw_url).await,
+/// Dispatch to the scheme-specific mover constructor, then apply QoS.
+async fn build_mover(
+    raw_url: &str,
+    parsed: &BackendUrl,
+    bandwidth_bps: u64,
+) -> Result<TerrasyncMover, String> {
+    let mover = match parsed.scheme {
+        BackendScheme::File => build_file_mover(parsed)?,
+        BackendScheme::S3 => build_s3_mover(raw_url, parsed).await?,
+        BackendScheme::Nfs => build_nfs_mover(raw_url).await?,
         BackendScheme::Cifs => {
-            Err("cifs:// is not yet implemented; use file://, nfs://, or s3://".into())
+            return Err(
+                "cifs:// is not yet implemented; use file://, nfs://, or s3://".into(),
+            );
         }
-    }
+    };
+    Ok(mover.with_bandwidth(bandwidth_bps))
 }
 
 /// `file://<path>` — local POSIX filesystem. Always compiled in.
