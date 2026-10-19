@@ -1,4 +1,4 @@
-# 通用 HSM：实现设计 v0.2
+# 通用 HSM：实现设计 v0.3
 
 当前工作区直接采用通用 HSM Interface，不保留旧文件系统 ABI、copytool daemon、v1 插件协议或其兼容模块。旧实现可从 Git 历史查看，不作为运行路径。
 
@@ -8,6 +8,7 @@
 |---|---|
 | hsm-core | EntityKey、DataKey、ArchiveKey、OperationContext、算法标记 digest；ManagedStorage / ArchiveBackend / DataMover Interface |
 | hsm-engine | 外部协调 Archive / Release / Recall；校验回执、查询未知结果、请求源存储原子效果 |
+| hsm-curvine | 原生控制协议、能力门控、结果校验；可选 SDK/current-file 数据桥接，无元数据镜像 |
 | hsm-local | 专用本地 managed namespace、不可变归档 catalog、真实 data-mover-rs 传输 Adapter、演示命令 |
 
 依赖方向：hsm-engine → hsm-core；hsm-local → hsm-engine + data-mover-rs。通用核心不依赖任何具体文件系统、数据库、传输协议或介质。
@@ -57,3 +58,11 @@ Data-mover 复制与 seal/GC 使用本地 session 锁。sealed marker 禁止旧 
 5. 最后接 tape-rs 和第二介质后端；Tape Adapter 在 data-mover 内，物理带库调度由 tape-rs 保留。
 
 SourceStorage 语义和所需 Curvine 改造详见 [Curvine HSM 设计](https://github.com/JayTsu-sh/curvine/tree/docs/hsm-design/docs/hsm)。实现阶段对当前 Interface 的简化均已在此列明，生产扩展不得以本地锁或 sidecar 文件替代 Curvine 的复制权威记录。
+
+## 7. Curvine 接入当前进度
+
+第一阶段已实现 `CurvineStorage<ControlTransport>`，把通用 Interface 映射到版本化原生 HsmControl RPC；不通过路径、mtime 或 xattr 猜测 generation。能力协商后逐项门控，响应需匹配实体/版本、内容和效果。服务端在实现复制权威记录及数据保护之前保持能力全 false。
+
+可选 native feature 实现 SDK TCP 控制和 `copy_current_file_to_local`：先按块读入私有本地 spool，再用真实 LocalDataMover 复制和独立验证。此读取针对普通已完成文件，前后 stat 检查不构成稳定 DataView。它没有源状态发布权，也没有接入 hsm-engine Archive/Release/Recall 工作流；不能据复制成功登记 anchor 或释放 Curvine 文件。
+
+下一阶段应按上节第 2 项实现 Curvine 原生合同，再替换 spool 为精确 view/private-layout 的执行器角色；目前不会以额外数据库、普通 free 或临时文件 rename 绕过这些改造。实现入口、feature 选择及测试边界见 [hsm-curvine](../crates/hsm-curvine/README.md)。

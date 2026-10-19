@@ -15,6 +15,14 @@ use crate::util::{decode_endpoint, digest_file, transfer_lock};
 #[derive(Clone, Copy, Default)]
 pub struct LocalDataMover;
 
+impl LocalDataMover {
+    /// Describe the `data` payload in a trusted private local root. This is a
+    /// local reference capability, not a production authentication token.
+    pub fn payload_endpoint(root: &std::path::Path) -> HsmResult<DataEndpoint> {
+        crate::util::endpoint(&root.canonicalize()?)
+    }
+}
+
 impl DataMover for LocalDataMover {
     async fn copy(
         &self,

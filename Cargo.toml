@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hsm-core", "crates/hsm-engine", "crates/hsm-local"]
+members = ["crates/hsm-core", "crates/hsm-engine", "crates/hsm-local", "crates/hsm-curvine"]
 
 [workspace.package]
 version = "0.0.1"

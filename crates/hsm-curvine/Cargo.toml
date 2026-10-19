@@ -1,0 +1,36 @@
+[package]
+name = "hsm-curvine"
+description = "Capability-negotiated Curvine Adapter for the generic HSM Interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+native = ["dep:curvine-client-core", "dep:curvine-fs-api", "dep:curvine-proto", "dep:curvine-error", "dep:hsm-local", "dep:tempfile", "dep:blake3"]
+native-integration = ["native", "dep:curvine-server", "dep:curvine-config", "dep:curvine-runtime"]
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+serde.workspace = true
+serde_json = "1"
+hsm-local = { path = "../hsm-local", optional = true }
+tempfile = { version = "3", optional = true }
+blake3 = { version = "1", optional = true }
+curvine-client-core = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+curvine-fs-api = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+curvine-proto = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+curvine-error = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+# Opt-in real-cluster test harness, not needed by the production native Adapter.
+curvine-server = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+curvine-config = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+
+curvine-runtime = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "8cc0babc27a39aed5ad22c18d5f62562a6a0664c", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true
