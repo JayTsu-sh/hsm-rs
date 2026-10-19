@@ -1,22 +1,10 @@
-//! Domain types for hsm-rs.
+//! Portable HSM identities and protected storage, backend and executor Interfaces.
 //!
-//! This crate has **no Lustre dependency** — it can be built and tested on any
-//! platform. The kernel-facing FFI lives in `lustre-sys` / `lustre-hsm-uapi`;
-//! this crate consumes those via conversion functions in `lustre-llapi`.
-//!
-//! All types here mirror the *semantics* of the Lustre HSM ABI but are
-//! deliberately not `#[repr(C)]` — they are the application-level model,
-//! free to evolve independently of the wire format.
+//! The external engine coordinates Archive / Release / Recall. Storage owns
+//! authoritative metadata and atomic data effects. No filesystem-specific ABI
+//! or kernel coordinator types are part of this crate.
 
 #![warn(missing_docs)]
 
-pub mod action;
-pub mod backend;
-pub mod errno;
-pub mod fid;
-pub mod xattr;
-
-pub use action::{Action, ActionKind, ActionRecord, AgentId, ArState, Cookie, Extent};
-pub use backend::{ArchiveId, BackendObject};
-pub use errno::HsmErrno;
-pub use fid::Fid;
+pub mod managed;
+pub use managed::*;

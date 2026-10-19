@@ -1,6 +1,6 @@
 [package]
 name = "hsm-core"
-description = "Domain types for hsm-rs (FID, Cookie, ArchiveId, Action, ArState). No Lustre dependency."
+description = "Portable HSM identities and storage, archive backend and executor interfaces."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,12 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-bytes = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-hex = { workspace = true }
 
 [lints]
 workspace = true

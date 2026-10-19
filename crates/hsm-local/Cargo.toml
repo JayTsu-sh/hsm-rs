@@ -1,0 +1,26 @@
+[package]
+name = "hsm-local"
+description = "Local managed-storage reference Adapter and data-mover integration for generic HSM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hsm-core = { path = "../hsm-core" }
+hsm-engine = { path = "../hsm-engine" }
+data-mover = { git = "https://github.com/JayTsu-sh/data-mover-rs.git", rev = "11fac12eee028c679293e4df6220584512561487" }
+serde.workspace = true
+serde_json = "1"
+blake3 = "1"
+uuid = { version = "1", features = ["v4"] }
+fs2 = "0.4"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
