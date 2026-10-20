@@ -176,7 +176,11 @@ impl DataMover for CurvineDataMover {
     }
 }
 impl CurvineStorage<NativeControl> {
-    async fn native_call<T: DeserializeOwned>(&self, request: Value, kind: &str) -> HsmResult<T> {
+    pub(crate) async fn native_call<T: DeserializeOwned>(
+        &self,
+        request: Value,
+        kind: &str,
+    ) -> HsmResult<T> {
         let payload = serde_json::to_vec(&request).map_err(|e| HsmError::Invalid(e.to_string()))?;
         if payload.len() > 64 * 1024 {
             return Err(HsmError::Invalid(

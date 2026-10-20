@@ -1,0 +1,11 @@
+{
+  "id": "recall",
+  "revision": 1,
+  "enabled": true,
+  "prefix": "/.hsm/demo-",
+  "min_size": 1,
+  "max_size": null,
+  "min_residency_ms": 0,
+  "action": "recall",
+  "backend": "local"
+}

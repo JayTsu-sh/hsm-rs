@@ -396,3 +396,6 @@ pub(crate) fn remote_error(code: &str, message: String) -> HsmError {
         _ => HsmError::Unknown(message),
     }
 }
+
+#[cfg(feature = "native")]
+mod lifecycle;
