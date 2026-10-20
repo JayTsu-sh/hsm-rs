@@ -1,44 +1,63 @@
-# Curvine Adapter：第一阶段
+# Curvine 原生 HSM Adapter
 
-此 crate 把通用 `ManagedStorage` 合同接到 Curvine 原生控制 RPC，不保存 inode、generation、驻留状态或 archive anchor 的本地镜像。身份、原始操作结果和受保护数据效果必须由 Curvine 提供。
+当前支持新建、不可变 `/.hsm/<name>` 文件的 **Archive → Release → Recall** 闭环。hsm-rs 协调工作流，Curvine 保存复制的权威记录和原始结果，data-mover-rs 搬运，LocalArchive 断言后端提交。没有外部全量 namespace 镜像，没有旧文件系统兼容路径。
 
-当前实现分两条路径：
+## 启用和范围
 
-- `CurvineStorage<T>`：能力协商、控制命令映射、错误分类、响应身份和效果校验；默认只依赖通用核心。原生服务端尚未实现权威 HSM 效果，所以目前所有 HSM 能力为 false，相应操作在发送前返回 Unsupported。
-- `NativeControl` / `CurvineIo`（`native` feature）：原生 Master TCP RPC，以及 SDK → 私有本地 spool → 真实 data-mover-rs Local transfer 的初始数据链路。没有 FUSE 或 POSIX 网关依赖。每次复制按块读取，内存不随文件增长，但 spool 需要完整文件空间，多一次本地复制。
+所有 Curvine Master/Worker 使用本分支协议，配置：
 
-`copy_current_file_to_local` 复制普通、已完成文件。读取前后的 inode/length/mtime 检查只能发现部分变化，不能证明读到单一稳定版本；它不会构造 DataKey、归档锚点或授权 Release。调用方应选择静止的测试文件。目标是受信任的专用本地 root，`LocalDataMover::payload_endpoint` 也不是生产认证机制。
-
-## 原生协议
-
-Curvine fork 的 `RpcCode::HsmControl = 61` 使用 protobuf envelope `{protocol_version, payload}`；payload 为带 `op` / `kind` 的版本 1 JSON。请求最大 64 KiB，客户端响应最大 1 MiB。不兼容协议、缺少能力、错误实体、错误 generation、不匹配内容和不正确驻留状态明确失败；未知服务端错误或传输中断保持 Unknown，不解释为 Absent。
-
-`ControlTransport` 可以注入测试，但 fixture 结果不代表 Curvine 已具备相关保证。生产 native transport 使用固定 Git revision，直接复用 SDK 的 Master connector。
-
-## 运行
-
-```sh
-# 默认测试不编译 Curvine SDK 或 server。
-cargo test -p hsm-curvine --locked
-
-# 原生客户端；Rust/C++ 构建环境和 protoc 必须可用。
-cargo check -p hsm-curvine --features native --locked
-
-# 真实临时 Master + Worker + TCP SDK + data-mover。
-# 额外需要 Clang/libclang 和 RocksDB 所需的 C++ 构建环境。
-CXXFLAGS=-g0 cargo test -p hsm-curvine --features native-integration --locked \
-  --test native_cluster -- --nocapture
+```toml
+[master]
+hsm_enabled = true
+[journal]
+enable = true
+writer_channel_size = 0
+leader_create_snapshot = false
 ```
 
-`CXXFLAGS=-g0` 只减少 C++ 调试信息，降低首次 RocksDB 构建开销。`native-integration` 仅用于集群测试，才引入 `curvine-server`；生产 `native` 不引入 server。测试使用独立临时数据目录及动态端口，单 Master/Worker，`testing=true`、journal 关闭；因此不验证 Raft 提交、跨节点恢复或 HSM Release/Recall。
+必须 `testing=false`。Master 以 `hsm-format-v1` 标记该卷的格式要求；不能在已有 HSM 卷上关闭该开关。首次状态请求通过提交日志创建保留目录 `/.hsm`；该目录应事先不存在。这里只支持直接子文件。普通 SDK 的创建/修改/open 不能进入这个作用域；读数据使用下面的完整文件 view 接口。其他 namespace 保持原来的路径。
 
-## 后续实现的必要条件
+原生能力包括 committed records、稳定 view、条件 Release、私有 Recall 和持久成功结果；至少三 Master 的配置报告 distributed_authority。容量预留、透明 Recall 为 false，使用者应显式 Recall。本地 archive 的 `local-fsync-v1` 不是介质或整机 HA 承诺。
 
-1. 在 Curvine journal 队列内增加 HSM 命令，使用 committed apply 保存原生记录、资格及原始结果；与普通 Create/Complete 保持顺序。
-2. 从创建开始限定 managed 文件范围，所有修改入口和 Worker 数据路径检查 generation/epoch；处理既有 writer、复制、删除和 short-circuit 引用。
-3. 提供跨进程保留的 DataView/pin，以及精确 view 读取。只有固定版本可进入 `prepare_archive`。
-4. 实现条件 Release：保留原 inode、逻辑长度和已提交 anchor，撤销 published layout 后再 GC。
-5. 实现原 inode 私有 RecallLayout、完整 seal、原子 publish、未知结果查询和旧执行器 fencing。
-6. 将 Curvine view/private-layout 作为 data-mover 原生角色接入，替换本阶段普通读取 spool。上述保证通过真实故障验收后逐项启用能力。
+## 组合
 
-不能把普通 free/delete 当成 Release，不能把临时文件 rename 当成 Recall publish，也不能用配置开关直接启用尚未实现的能力。
+调用方已有原生 SDK `CurvineFileSystem`，并创建独立本地 input root，其中 payload 名为 `data`：
+
+```rust,ignore
+let storage = CurvineStorage::connect(NativeControl::new(fs.clone())).await?;
+let mover = CurvineDataMover::new(fs.clone());
+let input = LocalDataMover::payload_endpoint(input_root)?;
+let initial = storage.import_file(&ctx("import"), "/.hsm/file", &input).await?;
+let backend = LocalArchive::open(archive_root, "local-archive")?;
+let engine = HsmEngine::new(storage.clone(), backend, mover);
+let key = ArchiveKey { backend: "local-archive".into(), object: unique_archive_id };
+let dual = engine.archive(&ctx("archive"), &initial.data, &key).await?;
+let offline = engine.release(&ctx("release"), &dual).await?;
+let restored = engine.recall(&ctx("recall"), &offline, &key).await?;
+assert_eq!(restored.data, initial.data);
+```
+
+`ctx` 产生稳定、全局唯一工作流 ID、当前 controller epoch、attempt epoch 1。不同动作使用不同 ID，重试同一动作保持 ID 和输入；确定失败后改变条件重试应使用新 ID。`controller_epoch()` 读取资格，接管时 `claim_controller(ctx, expected_epoch)` 条件提升；旧 epoch 不能修改存储。归档 Key 独立于 attempt 和物理位置。
+
+`resolve(path)` 获取原生 DataKey；`read_to_local(ctx, data, destination)` 取得持久 pin、复制并关闭 view；`collect_garbage(entity)` 重试 committed GC。协调者重开后可通过 `pending_view` / `pending_recall` 找到 pin/私有布局，停止旧 I/O 后 `close_view` / `abort_recall`。这些事实全部来自 Curvine。
+
+## 执行器与持久性
+
+`CurvineDataMover` 实现通用 DataMover，支持 Curvine view → Local、Local → Curvine private layout 以及 Local → Local。当前使用私有全文件 spool 和真实 LocalDataMover Checkpointed transfer，内存有界，但需要完整临时空间和额外复制。
+
+Worker 按块接收，重复前缀必须内容一致，Verify 独立读取完整目标。Master CommitRecall 再要求 Worker Seal：同步数据、验证 length/digest、持久撤销写权限，然后提交原 inode 的 published 引用。旧写/删除不会作用于另一 allocation；墓碑跨重启保留。Release 先提交撤销引用和 GC outbox，再做物理删除；GC 错误保留待重试状态。
+
+默认无 native feature，只编译协议 Adapter 和通用合同测试。`native` 引入 SDK/执行器；`native-integration` 额外引入 server 测试 harness，不属于生产客户端依赖。
+
+```sh
+cargo test --workspace --locked
+CXXFLAGS=-g0 cargo test --workspace --features hsm-curvine/native-integration --locked -j 6
+CXXFLAGS=-g0 cargo clippy --workspace --all-targets \
+  --features hsm-curvine/native-integration --locked -j 6 -- -D warnings
+```
+
+需要 Rust/C++ 工具链、protoc、Clang/libclang；`CXXFLAGS=-g0` 减少 RocksDB C++ 调试信息。managed_cluster 启动真实三 Master/单 Worker 子进程，三次强制重启均排除旧 leader，保留实际数据目录；验证完整字节、身份、原始结果、pin、epoch、物理 GC 和坏 Recall 不发布。ignore 的 process_cluster_child 只由测试父进程启动。
+
+普通 `copy_current_file_to_local` 仍是独立诊断 helper，不参与此闭环，也不会构造稳定 view 或授权释放。
+
+当前不支持存量普通文件直接转管、可变文件、嵌套 managed 目录、attempt > 1、自动生命周期/任务 daemon、透明 offline 访问、容量预留、普通 Worker 块统计/副本修复、SPDK 或磁带。未验证断电、盘损坏和全部故障矩阵；初版不自动清除失败 import/pin/private layout，避免把未知结果误当失败。

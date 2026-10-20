@@ -1,4 +1,4 @@
-# 通用 HSM：实现设计 v0.3
+# 通用 HSM：实现设计 v0.4
 
 当前工作区直接采用通用 HSM Interface，不保留旧文件系统 ABI、copytool daemon、v1 插件协议或其兼容模块。旧实现可从 Git 历史查看，不作为运行路径。
 
@@ -8,7 +8,7 @@
 |---|---|
 | hsm-core | EntityKey、DataKey、ArchiveKey、OperationContext、算法标记 digest；ManagedStorage / ArchiveBackend / DataMover Interface |
 | hsm-engine | 外部协调 Archive / Release / Recall；校验回执、查询未知结果、请求源存储原子效果 |
-| hsm-curvine | 原生控制协议、能力门控、结果校验；可选 SDK/current-file 数据桥接，无元数据镜像 |
+| hsm-curvine | 原生控制协议、能力门控、稳定 view/private Recall 与真实 data-mover 桥接，无元数据镜像 |
 | hsm-local | 专用本地 managed namespace、不可变归档 catalog、真实 data-mover-rs 传输 Adapter、演示命令 |
 
 依赖方向：hsm-engine → hsm-core；hsm-local → hsm-engine + data-mover-rs。通用核心不依赖任何具体文件系统、数据库、传输协议或介质。
@@ -47,22 +47,24 @@ Data-mover 复制与 seal/GC 使用本地 session 锁。sealed marker 禁止旧 
 
 运行 cargo test --workspace 验证真实本地复制、Archive/Release/Recall、源与后端重开、原成功结果重试、不可变归档 ID 冲突、Pending 保护、stale state、错误 generation、Recall 损坏不发布和 root 所有权。
 
-当前核心是可组合的同步工作流入口，还没有分布式 daemon/worker RPC、控制者选举、独立 mutation 查询、Abort/取消/资源清理工作流、容量 claim、自动策略或透明 offline 事件。失败和 Unknown 保留 pin/private layout 以供对账，不能在错误时自动删资源。不能据本地闭环宣称生产 HA 或完整 HSM 验收。
+当前核心提供由调用者驱动的工作流入口，还没有分布式 daemon/worker RPC、控制者选举、独立 mutation 查询、Abort/取消/资源清理工作流、容量 claim、自动策略或透明 offline 事件。失败和 Unknown 保留 pin/private layout 以供对账，不能在错误时自动删资源。不能据本地闭环宣称生产 HA 或完整 HSM 验收。
 
-## 6. Curvine 与后续顺序
+## 6. 实施顺序与后续
 
-1. 先稳定通用 Interface 与 hsm-rs ↔ data-mover ↔ local archive 可执行闭环。
-2. Curvine 提供同一 ManagedStorage Interface 的远端 Adapter：原生身份/generation、committed 控制记录与 outcome、固定 DataView、Release、原 inode RecallLayout 和 CommitRecall。
-3. data-mover 增加受约束的自定义角色装配入口或原生 Curvine backend，实现 view source/private-layout destination；当前公开 Storage 构造器不能直接装入外部角色。
-4. 原型逐步增加 durable attempt/reconciliation/Abort、offline event、capacity claim、native lifecycle 和实际故障测试。Curvine 可靠提交和写者 fencing 未完成前禁止唯一在线副本 Release。
+1. 已完成通用 Interface 与 hsm-rs ↔ data-mover ↔ local archive 可执行闭环。
+2. 已完成 Curvine 同一 ManagedStorage Interface 的远端 Adapter：原生身份/generation、committed 控制记录与 outcome、固定 DataView、Release、原 inode RecallLayout 和 CommitRecall。
+3. 当前 CurvineDataMover 通过完整 spool 桥接实际 Local transfer。后续可在 data-mover 增加受约束的角色装配入口或原生 Curvine backend，减少复制；当前公开 Storage 构造器不能直接装入外部角色。
+4. 后续增加自动 attempt/reconciliation/Abort 工作流、offline event、capacity claim、native lifecycle 和完整故障矩阵。当前闭环已有 committed apply、写者 fencing 和手动查询/Abort/GC，Release 限于该受管范围。
 5. 最后接 tape-rs 和第二介质后端；Tape Adapter 在 data-mover 内，物理带库调度由 tape-rs 保留。
 
 SourceStorage 语义和所需 Curvine 改造详见 [Curvine HSM 设计](https://github.com/JayTsu-sh/curvine/tree/docs/hsm-design/docs/hsm)。实现阶段对当前 Interface 的简化均已在此列明，生产扩展不得以本地锁或 sidecar 文件替代 Curvine 的复制权威记录。
 
-## 7. Curvine 接入当前进度
+## 7. Curvine 原生闭环
 
-第一阶段已实现 `CurvineStorage<ControlTransport>`，把通用 Interface 映射到版本化原生 HsmControl RPC；不通过路径、mtime 或 xattr 猜测 generation。能力协商后逐项门控，响应需匹配实体/版本、内容和效果。服务端在实现复制权威记录及数据保护之前保持能力全 false。
+当前 hsm-curvine 已接入 HsmEngine 的三类动作。Curvine 原生 HSM 记录、工作流绑定和原始结果在同一 metadata common CF，通过现有 journal 队列 committed apply；Leader/follower 执行相同状态机。控制读取使用提交屏障，并确认在本节点 apply，防止换主后的旧资格/旧进度查询。
 
-可选 native feature 实现 SDK TCP 控制和 `copy_current_file_to_local`：先按块读入私有本地 spool，再用真实 LocalDataMover 复制和独立验证。此读取针对普通已完成文件，前后 stat 检查不构成稳定 DataView。它没有源状态发布权，也没有接入 hsm-engine Archive/Release/Recall 工作流；不能据复制成功登记 anchor 或释放 Curvine 文件。
+第一版在新建的 /.hsm 目录内管理直接子文件。该范围从创建起不可变，普通元数据预写入不能进入；现有 inode 不做原地转管。Worker 私有 allocation 与普通 block ID/短路路径隔离，封存、写权限及删除墓碑持久化。Release 提交撤销 published 引用及 GC intent；Recall 在原 inode 下私有写入，Worker 重新校验并封存后再提交 published 引用。存储不查询介质，不负责跨后端工作流。
 
-下一阶段应按上节第 2 项实现 Curvine 原生合同，再替换 spool 为精确 view/private-layout 的执行器角色；目前不会以额外数据库、普通 free 或临时文件 rename 绕过这些改造。实现入口、feature 选择及测试边界见 [hsm-curvine](../crates/hsm-curvine/README.md)。
+执行器通过 CurvineDataMover 满足相同 DataMover Interface，当前用私有完整 spool 与实际 data-mover Local transfer。此路径读取精确 DataView，写入受限 Recall endpoint；前一阶段普通文件 stat/read 的诊断 helper 不参与工作流。
+
+现有 SourceStorage 原语与通用 Interface 保持一致，Curvine 扩展 import/resolve、controller claim、pending view/Recall 查询、close/abort 和 GC 重试。第一版 attempt epoch 限 1；自动任务 daemon、生命周期批次、透明 Recall、容量 claim、块统计/副本修复及介质后端仍待实现。配置、运行方式和故障验证见 [hsm-curvine](../crates/hsm-curvine/README.md)。
