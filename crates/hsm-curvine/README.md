@@ -2,6 +2,8 @@
 
 当前支持新建、不可变 `/.hsm/<name>` 文件的 **Archive → Release → Recall** 闭环。hsm-rs 协调工作流，Curvine 保存复制的权威记录和原始结果，data-mover-rs 搬运，LocalArchive 断言后端提交。没有外部全量 namespace 镜像，没有旧文件系统兼容路径。
 
+策略/任务、CLI、一键本地集群场景及恢复步骤见 [本地 HSM 与生命周期](../../docs/LOCAL-HSM.md)。
+
 ## 启用和范围
 
 所有 Curvine Master/Worker 使用本分支协议，配置：
@@ -60,4 +62,4 @@ CXXFLAGS=-g0 cargo clippy --workspace --all-targets \
 
 普通 `copy_current_file_to_local` 仍是独立诊断 helper，不参与此闭环，也不会构造稳定 view 或授权释放。
 
-当前不支持存量普通文件直接转管、可变文件、嵌套 managed 目录、attempt > 1、自动生命周期/任务 daemon、透明 offline 访问、容量预留、普通 Worker 块统计/副本修复、SPDK 或磁带。未验证断电、盘损坏和全部故障矩阵；初版不自动清除失败 import/pin/private layout，避免把未知结果误当失败。
+当前不支持存量普通文件直接转管、可变文件、嵌套 managed 目录、attempt > 1、访问热度/容量水位策略、透明 offline 访问、容量预留、普通 Worker 块统计/副本修复、SPDK 或磁带。未验证断电、盘损坏和全部故障矩阵；初版不自动清除失败 import/pin/private layout，避免把未知结果误当失败。

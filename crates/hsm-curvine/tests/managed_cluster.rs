@@ -267,3 +267,493 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         Ok::<(),Box<dyn std::error::Error+Send+Sync>>(())
     })
 }
+
+fn cli(root: &Path, args: &[&str], success: bool) -> Result<Vec<serde_json::Value>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_hsm-curvine"))
+        .args([
+            "--config",
+            root.join("client.json").to_str().unwrap(),
+            "--archive-root",
+            root.join("archive").to_str().unwrap(),
+            "--backend-id",
+            "local",
+        ])
+        .args(args)
+        .output()?;
+    assert_eq!(
+        output.status.success(),
+        success,
+        "CLI {args:?}: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect())
+}
+fn policy_file(
+    root: &Path,
+    id: &str,
+    action: hsm_core::PolicyAction,
+    prefix: &str,
+    min_size: u64,
+) -> Result<hsm_core::LifecyclePolicy> {
+    let policy = hsm_core::LifecyclePolicy {
+        id: id.into(),
+        revision: 1,
+        enabled: true,
+        prefix: prefix.into(),
+        min_size,
+        max_size: None,
+        min_residency_ms: 0,
+        action,
+        backend: "local".into(),
+    };
+    fs::write(
+        root.join(format!("{id}.json")),
+        serde_json::to_vec(&policy)?,
+    )?;
+    Ok(policy)
+}
+
+// Keep the real restart/CLI phases in one fixture; each phase depends on its predecessor.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn local_file_policies_survive_takeover_and_execute_through_cli() -> Result {
+    use hsm_core::{
+        ArchiveBackend, IntentCompletion, IntentStatus, LifecycleStorage, PolicyAction,
+    };
+    let root = tempfile::tempdir()?;
+    let mut processes = ProcessCluster::start(root.path())?;
+    let (masters, _): (Vec<ClusterConf>, Vec<ClusterConf>) =
+        serde_json::from_slice(&fs::read(root.path().join("cluster.json"))?)?;
+    fs::write(
+        root.path().join("client.json"),
+        serde_json::to_vec(&masters[0])?,
+    )?;
+    let bytes: Vec<u8> = (0..3 * 1024 * 1024 + 19).map(|i| (i % 251) as u8).collect();
+    for (name, data) in [
+        ("cold-a", bytes.as_slice()),
+        ("cold-b", &bytes[..4099]),
+        ("cold-small", &b"small"[..]),
+        ("hot-a", &b"hot"[..]),
+    ] {
+        let input = root.path().join(format!("{name}.bin"));
+        fs::write(&input, data)?;
+        cli(
+            root.path(),
+            &[
+                "--op-id",
+                name,
+                "import",
+                input.to_str().unwrap(),
+                &format!("/.hsm/{name}"),
+            ],
+            true,
+        )?;
+    }
+    let mut archive_policy = policy_file(
+        root.path(),
+        "archive",
+        PolicyAction::Archive,
+        "/.hsm/cold-",
+        1000,
+    )?;
+    archive_policy.enabled = false;
+    fs::write(
+        root.path().join("archive.json"),
+        serde_json::to_vec(&archive_policy)?,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("archive.json").to_str().unwrap(),
+        ],
+        true,
+    )?;
+    assert_eq!(
+        cli(root.path(), &["scan", "archive"], true)?[0]["admitted"],
+        serde_json::json!([])
+    );
+    archive_policy.enabled = true;
+    archive_policy.revision = 2;
+    fs::write(
+        root.path().join("archive.json"),
+        serde_json::to_vec(&archive_policy)?,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("archive.json").to_str().unwrap(),
+            "--expected-revision",
+            "1",
+        ],
+        true,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("archive.json").to_str().unwrap(),
+            "--expected-revision",
+            "1",
+        ],
+        false,
+    )?;
+    let mut age = policy_file(
+        root.path(),
+        "age",
+        PolicyAction::Archive,
+        "/.hsm/cold-",
+        1000,
+    )?;
+    age.min_residency_ms = 365 * 24 * 60 * 60 * 1000;
+    fs::write(root.path().join("age.json"), serde_json::to_vec(&age)?)?;
+    cli(
+        root.path(),
+        &["policy-put", root.path().join("age.json").to_str().unwrap()],
+        true,
+    )?;
+    assert_eq!(
+        cli(root.path(), &["scan", "age"], true)?[0]["admitted"],
+        serde_json::json!([])
+    );
+
+    let rt = Arc::new(masters[0].client_rpc_conf().create_runtime());
+    let fs_client = CurvineFileSystem::with_rt(masters[0].clone(), rt.clone())?;
+    rt.block_on(async {
+        let storage = CurvineStorage::connect(NativeControl::new(fs_client.clone())).await?;
+        let mut after = None;
+        let mut admitted = vec![];
+        let mut examined = 0;
+        loop {
+            let batch = storage
+                .scan_policy(
+                    &context(&format!("scan-{examined}")),
+                    "archive",
+                    after.as_deref(),
+                    1,
+                )
+                .await?;
+            assert!(batch.examined <= 1);
+            examined += batch.examined;
+            admitted.extend(batch.admitted);
+            after = batch.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(examined, 4);
+        assert_eq!(admitted.len(), 2);
+        assert!(
+            storage
+                .scan_policy(&context("dedupe"), "archive", None, 16)
+                .await?
+                .admitted
+                .is_empty()
+        );
+        let overlap = policy_file(
+            root.path(),
+            "overlap",
+            PolicyAction::Archive,
+            "/.hsm/cold-",
+            1000,
+        )?;
+        storage
+            .put_policy(&context("overlap-put"), &overlap, None)
+            .await?;
+        assert!(
+            storage
+                .scan_policy(&context("overlap-scan"), "overlap", None, 16)
+                .await?
+                .admitted
+                .is_empty()
+        );
+        let first = storage
+            .claim_intent(&context("claim-first"), &admitted[0], "before-crash")
+            .await?;
+        assert!(matches!(
+            storage
+                .claim_intent(&context("competing-claim"), &first.id, "other")
+                .await,
+            Err(HsmError::Busy(_))
+        ));
+        assert!(matches!(
+            storage
+                .finish_intent(&context("fake-success"), &first, IntentCompletion::Done)
+                .await,
+            Err(HsmError::Busy(_))
+        ));
+        let second = storage
+            .claim_intent(&context("claim-second"), &admitted[1], "before-crash")
+            .await?;
+        let ready = storage
+            .finish_intent(
+                &context("uncertain-report"),
+                &second,
+                IntentCompletion::Retry("injected transport uncertainty".into()),
+            )
+            .await?;
+        assert_eq!(ready.status, IntentStatus::Ready);
+        assert_eq!(ready.context.operation_id, second.context.operation_id);
+        let second = storage
+            .claim_intent(&context("reclaim-second"), &second.id, "before-crash")
+            .await?;
+        let archive = LocalArchive::open(root.path().join("archive"), "local")?;
+        let mover = CurvineDataMover::new(fs_client.clone());
+        let engine = HsmEngine::new(storage.clone(), archive.clone(), mover.clone());
+        let hsm_core::ManagedAction::Archive(first_key) = &first.action else {
+            panic!("archive intent")
+        };
+        let original = engine
+            .archive(&first.context, &first.expected.data, first_key)
+            .await?;
+        // Crash window A: source effect committed, task finish not persisted.
+        let hsm_core::ManagedAction::Archive(second_key) = &second.action else {
+            panic!("archive intent")
+        };
+        let view = storage
+            .prepare_archive(&second.context, &second.expected.data)
+            .await?;
+        let target = archive.prepare(&second.context, second_key, &view).await?;
+        mover
+            .copy(&second.context, &view.source, &target.destination)
+            .await?;
+        let descriptor: serde_json::Value = serde_json::from_slice(&target.destination.capability)?;
+        let payload_root = PathBuf::from(descriptor["root"].as_str().ok_or("local root missing")?);
+        fs::File::open(payload_root.join("data"))?.sync_all()?;
+        fs::write(
+            payload_root.join("sealed.json"),
+            serde_json::to_vec(&(second_key, &view.data, &view.digest))?,
+        )?;
+        fs::File::open(payload_root.join("sealed.json"))?.sync_all()?;
+        fs::File::open(&payload_root)?.sync_all()?;
+        // Crash window B: data sealed, backend receipt not published; no source anchor.
+        drop(engine);
+        drop(archive);
+        let leader = fs_client.get_filesystem_info().await?.active_master;
+        processes.restart(&leader)?;
+        assert_eq!(
+            storage
+                .intent(&context("persisted-intent"), &first.id)
+                .await?
+                .status,
+            IntentStatus::Running
+        );
+        assert_eq!(
+            storage
+                .policies(&context("persisted-policy"), None, 16)
+                .await?
+                .items
+                .iter()
+                .find(|p| p.id == "archive")
+                .unwrap()
+                .revision,
+            2
+        );
+        cli(root.path(), &["worker", "--once"], true)?; // current epoch cannot steal running work.
+        cli(root.path(), &["takeover", "--expected-epoch", "1"], true)?;
+        assert!(matches!(
+            storage
+                .finish_intent(&context("old-finish"), &first, IntentCompletion::Done)
+                .await,
+            Err(HsmError::Fenced)
+        ));
+        cli(root.path(), &["worker", "--once"], true)?;
+        let mut ctx = context("recovered");
+        ctx.controller_epoch = 2;
+        let done = storage.intent(&ctx, &first.id).await?;
+        assert_eq!(done.status, IntentStatus::Done);
+        assert_eq!(done.result, Some(original));
+        let done = storage.intent(&ctx, &second.id).await?;
+        assert_eq!(done.status, IntentStatus::Done);
+        assert_eq!(
+            fs::read_dir(root.path().join("archive/objects"))?.count(),
+            2
+        );
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })?;
+    // Separate CLI invocations reopen the backend and coordinator for every phase.
+    let release = policy_file(
+        root.path(),
+        "release",
+        PolicyAction::Release,
+        "/.hsm/cold-",
+        1000,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("release.json").to_str().unwrap(),
+        ],
+        true,
+    )?;
+    // Corruption must fail closed, retaining that online source copy.
+    let object: serde_json::Value = serde_json::from_slice(&fs::read(
+        fs::read_dir(root.path().join("archive/objects"))?
+            .next()
+            .unwrap()?
+            .path(),
+    )?)?;
+    let descriptor: serde_json::Value =
+        serde_json::from_value(object["payload"]["capability"].clone())
+            .and_then(|bytes: Vec<u8>| serde_json::from_slice(&bytes))?;
+    let corrupt = PathBuf::from(descriptor["root"].as_str().unwrap()).join("data");
+    let saved = fs::read(&corrupt)?;
+    fs::write(&corrupt, b"corrupt")?;
+    cli(root.path(), &["worker", "--once"], false)?;
+    let jobs = cli(root.path(), &["jobs"], true)?;
+    assert!(jobs.iter().any(|i| i["status"] == "failed"));
+    let states = [
+        cli(root.path(), &["status", "/.hsm/cold-a"], true)?[0].clone(),
+        cli(root.path(), &["status", "/.hsm/cold-b"], true)?[0].clone(),
+    ];
+    assert_eq!(
+        states.iter().filter(|s| s["residency"] == "Dual").count(),
+        1
+    );
+    assert_eq!(
+        states
+            .iter()
+            .filter(|s| s["residency"] == "Offline")
+            .count(),
+        1
+    );
+    fs::write(&corrupt, saved)?;
+    let mut revised = release;
+    revised.revision = 2;
+    fs::write(
+        root.path().join("release.json"),
+        serde_json::to_vec(&revised)?,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("release.json").to_str().unwrap(),
+            "--expected-revision",
+            "1",
+        ],
+        true,
+    )?;
+    cli(root.path(), &["worker", "--once"], true)?;
+    for name in ["cold-a", "cold-b"] {
+        assert_eq!(
+            cli(root.path(), &["status", &format!("/.hsm/{name}")], true)?[0]["residency"],
+            "Offline"
+        );
+    }
+    cli(
+        root.path(),
+        &[
+            "read",
+            "/.hsm/cold-a",
+            root.path().join("offline-output").to_str().unwrap(),
+        ],
+        false,
+    )?;
+    // Disable the revised release rule before the explicit restore policy.
+    revised.revision = 3;
+    revised.enabled = false;
+    fs::write(
+        root.path().join("release.json"),
+        serde_json::to_vec(&revised)?,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("release.json").to_str().unwrap(),
+            "--expected-revision",
+            "2",
+        ],
+        true,
+    )?;
+    policy_file(
+        root.path(),
+        "recall",
+        PolicyAction::Recall,
+        "/.hsm/cold-",
+        1000,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("recall.json").to_str().unwrap(),
+        ],
+        true,
+    )?;
+    cli(root.path(), &["worker", "--once"], true)?;
+    for (name, expected) in [("cold-a", bytes.as_slice()), ("cold-b", &bytes[..4099])] {
+        let output = root.path().join(format!("{name}.restored"));
+        cli(
+            root.path(),
+            &["read", &format!("/.hsm/{name}"), output.to_str().unwrap()],
+            true,
+        )?;
+        assert_eq!(fs::read(output)?, expected);
+        assert_eq!(
+            cli(root.path(), &["status", &format!("/.hsm/{name}")], true)?[0]["residency"],
+            "Dual"
+        );
+    }
+    let mut cancel = policy_file(
+        root.path(),
+        "cancel",
+        PolicyAction::Archive,
+        "/.hsm/hot-",
+        0,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("cancel.json").to_str().unwrap(),
+        ],
+        true,
+    )?;
+    let cancelled = cli(root.path(), &["scan", "cancel"], true)?;
+    assert_eq!(cancelled[0]["admitted"].as_array().unwrap().len(), 1);
+    cancel.enabled = false;
+    cancel.revision = 2;
+    fs::write(
+        root.path().join("cancel.json"),
+        serde_json::to_vec(&cancel)?,
+    )?;
+    cli(
+        root.path(),
+        &[
+            "policy-put",
+            root.path().join("cancel.json").to_str().unwrap(),
+            "--expected-revision",
+            "1",
+        ],
+        true,
+    )?;
+    cli(root.path(), &["worker", "--once"], true)?;
+    assert!(
+        cli(root.path(), &["jobs"], true)?
+            .iter()
+            .any(|i| i["policy"] == "cancel" && i["status"] == "superseded")
+    );
+    assert_eq!(
+        cli(root.path(), &["worker", "--once"], true)?
+            .last()
+            .unwrap()["executed"],
+        0
+    );
+    assert_eq!(
+        cli(root.path(), &["status", "/.hsm/hot-a"], true)?[0]["residency"],
+        "Online"
+    );
+    assert_eq!(
+        cli(root.path(), &["status", "/.hsm/cold-small"], true)?[0]["residency"],
+        "Online"
+    );
+    Ok(())
+}

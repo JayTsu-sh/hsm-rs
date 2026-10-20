@@ -12,6 +12,8 @@
 | [hsm-curvine](crates/hsm-curvine/README.md) | Curvine 原生权威记录、稳定 view、条件 Release、原 inode Recall 与 data-mover 本地桥接 |
 | [详细设计](docs/DESIGN.md) | 合同、持久化、保证范围、限制和 Curvine 接入顺序 |
 
+策略、持久任务与可运行的本地文件全场景已实现，见 [本地 HSM 与生命周期](docs/LOCAL-HSM.md)。
+
 ## 运行
 
 本地参考实现要求 Unix 文件系统的目录 fsync、advisory lock 和 hard-link 支持。当前依赖锁要求 Rust 1.94.1 或更新版本；已使用 Rust 1.98.1 验证。data-mover 当前没有后端 feature gates，因此本地调用仍会编译其其他后端依赖。

@@ -1,4 +1,4 @@
-# 通用 HSM：实现设计 v0.4
+# 通用 HSM：实现设计 v0.5
 
 当前工作区直接采用通用 HSM Interface，不保留旧文件系统 ABI、copytool daemon、v1 插件协议或其兼容模块。旧实现可从 Git 历史查看，不作为运行路径。
 
@@ -47,7 +47,7 @@ Data-mover 复制与 seal/GC 使用本地 session 锁。sealed marker 禁止旧 
 
 运行 cargo test --workspace 验证真实本地复制、Archive/Release/Recall、源与后端重开、原成功结果重试、不可变归档 ID 冲突、Pending 保护、stale state、错误 generation、Recall 损坏不发布和 root 所有权。
 
-当前核心提供由调用者驱动的工作流入口，还没有分布式 daemon/worker RPC、控制者选举、独立 mutation 查询、Abort/取消/资源清理工作流、容量 claim、自动策略或透明 offline 事件。失败和 Unknown 保留 pin/private layout 以供对账，不能在错误时自动删资源。不能据本地闭环宣称生产 HA 或完整 HSM 验收。
+当前核心提供由调用者驱动的工作流入口，通用核心不负责控制者选举、容量 claim 或透明 offline 事件；Curvine 的持久策略/任务与轮询 worker 已实现，手动资格接管及恢复见 LOCAL-HSM.md。失败和 Unknown 保留 pin/private layout 以供对账，不能在错误时自动删资源。不能据本地闭环宣称生产 HA 或完整 HSM 验收。
 
 ## 6. 实施顺序与后续
 
@@ -67,4 +67,4 @@ SourceStorage 语义和所需 Curvine 改造详见 [Curvine HSM 设计](https://
 
 执行器通过 CurvineDataMover 满足相同 DataMover Interface，当前用私有完整 spool 与实际 data-mover Local transfer。此路径读取精确 DataView，写入受限 Recall endpoint；前一阶段普通文件 stat/read 的诊断 helper 不参与工作流。
 
-现有 SourceStorage 原语与通用 Interface 保持一致，Curvine 扩展 import/resolve、controller claim、pending view/Recall 查询、close/abort 和 GC 重试。第一版 attempt epoch 限 1；自动任务 daemon、生命周期批次、透明 Recall、容量 claim、块统计/副本修复及介质后端仍待实现。配置、运行方式和故障验证见 [hsm-curvine](../crates/hsm-curvine/README.md)。
+现有 SourceStorage 原语与通用 Interface 保持一致，Curvine 扩展 import/resolve、controller claim、pending view/Recall 查询、close/abort 和 GC 重试。第一版 attempt epoch 限 1；生命周期批次与外部轮询 worker 已实现；透明 Recall、访问热度/容量水位策略、容量 claim、块统计/副本修复及介质后端仍待实现。配置、运行方式和故障验证见 [hsm-curvine](../crates/hsm-curvine/README.md)。
