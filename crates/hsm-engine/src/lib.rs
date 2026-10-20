@@ -5,6 +5,70 @@ use hsm_core::managed::{
     ArchiveBackend, ArchiveKey, ArchiveReceipt, ArchiveStatus, DataKey, DataMover, EntityKey,
     EntityState, HsmError, HsmResult, ManagedAction, ManagedStorage, OperationContext, Residency,
 };
+use hsm_core::{IntentCompletion, IntentStatus, LifecycleIntent, LifecycleStorage};
+
+impl<S: ManagedStorage + LifecycleStorage, B: ArchiveBackend, M: DataMover> HsmEngine<S, B, M> {
+    /// Execute one storage-owned intent. Stable effect IDs reconcile a crash after
+    /// publication; a new controller can claim old work without a local task DB.
+    pub async fn run_intent(
+        &self,
+        claim_context: &OperationContext,
+        id: &str,
+        owner: &str,
+    ) -> HsmResult<LifecycleIntent> {
+        let lease = self.storage.claim_intent(claim_context, id, owner).await?;
+        if lease.status != IntentStatus::Running {
+            return Ok(lease);
+        }
+        let result: HsmResult<IntentCompletion> = async {
+            if self
+                .storage
+                .completed(&lease.context, &lease.expected.data, &lease.action)
+                .await?
+                .is_some()
+            {
+                return Ok(IntentCompletion::Done);
+            }
+            if self.storage.inspect(&lease.expected.data.entity).await? != lease.expected {
+                return Ok(IntentCompletion::Superseded(
+                    "source observation changed".into(),
+                ));
+            }
+            match &lease.action {
+                ManagedAction::Archive(key) => {
+                    self.archive(&lease.context, &lease.expected.data, key)
+                        .await?
+                }
+                ManagedAction::Release => self.release(&lease.context, &lease.expected).await?,
+                ManagedAction::Recall(key) => {
+                    self.recall(&lease.context, &lease.expected, key).await?
+                }
+            };
+            Ok(IntentCompletion::Done)
+        }
+        .await;
+        let report = match result {
+            Ok(report) => report,
+            Err(error @ (HsmError::Unknown(_) | HsmError::Io(_))) => {
+                IntentCompletion::Retry(error.to_string())
+            }
+            Err(error) => IntentCompletion::Failed(error.to_string()),
+        };
+        let finish = OperationContext {
+            operation_id: format!(
+                "{}:finish",
+                lease
+                    .claim
+                    .as_ref()
+                    .ok_or_else(|| HsmError::Integrity("running intent has no claim".into()))?
+                    .id
+            ),
+            controller_epoch: lease.context.controller_epoch,
+            attempt_epoch: 1,
+        };
+        self.storage.finish_intent(&finish, &lease, report).await
+    }
+}
 
 /// External coordinator; adapters own authority and backend commit facts.
 pub struct HsmEngine<S, B, M> {
