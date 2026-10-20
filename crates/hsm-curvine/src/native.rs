@@ -22,6 +22,9 @@ impl NativeControl {
     pub const fn new(fs: CurvineFileSystem) -> Self {
         Self { fs }
     }
+    pub const fn filesystem(&self) -> &CurvineFileSystem {
+        &self.fs
+    }
 }
 
 impl ControlTransport for NativeControl {

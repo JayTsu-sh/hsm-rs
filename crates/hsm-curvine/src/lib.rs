@@ -1,8 +1,8 @@
 //! Curvine control Adapter. No local metadata mirror, xattr approximation,
 //! ordinary free/delete or rename-based Recall publication.
 //!
-//! The current Curvine server advertises no native HSM effects. Those calls
-//! fail closed until real authority/view/layout guarantees are available.
+//! Native HSM effects require an explicitly enabled server and immutable managed
+//! files. Capability negotiation keeps ordinary or older servers fail-closed.
 
 mod protocol;
 pub use protocol::{ControlReply, ControlRequest, CurvineCapabilities};
@@ -11,6 +11,10 @@ pub use protocol::{ControlReply, ControlRequest, CurvineCapabilities};
 mod native;
 #[cfg(feature = "native")]
 pub use native::{CurvineIo, NativeControl};
+#[cfg(feature = "native")]
+mod managed_io;
+#[cfg(feature = "native")]
+pub use managed_io::CurvineDataMover;
 
 use hsm_core::{
     ArchiveReceipt, DataKey, DataView, EntityKey, EntityState, HsmError, HsmResult, ManagedAction,
@@ -25,6 +29,7 @@ pub trait ControlTransport: Send + Sync {
 }
 
 /// Generic HSM storage Adapter backed exclusively by native Curvine control.
+#[derive(Clone)]
 pub struct CurvineStorage<T> {
     transport: T,
     capabilities: CurvineCapabilities,
@@ -94,16 +99,7 @@ async fn exchange(
     let response: ControlReply =
         serde_json::from_slice(&response).map_err(|e| HsmError::Integrity(e.to_string()))?;
     if let ControlReply::Error { code, message } = response {
-        return Err(match code.as_str() {
-            "unsupported" => HsmError::Unsupported(message),
-            "invalid" => HsmError::Invalid(message),
-            "conflict" => HsmError::Conflict(message),
-            "busy" => HsmError::Busy(message),
-            "not_found" => HsmError::NotFound(message),
-            "fenced" => HsmError::Fenced,
-            "integrity" => HsmError::Integrity(message),
-            _ => HsmError::Unknown(message),
-        });
+        return Err(remote_error(&code, message));
     }
     Ok(response)
 }
@@ -386,4 +382,17 @@ fn validate_state(state: &EntityState) -> HsmResult<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn remote_error(code: &str, message: String) -> HsmError {
+    match code {
+        "unsupported" => HsmError::Unsupported(message),
+        "invalid" => HsmError::Invalid(message),
+        "conflict" => HsmError::Conflict(message),
+        "busy" => HsmError::Busy(message),
+        "not_found" => HsmError::NotFound(message),
+        "fenced" => HsmError::Fenced,
+        "integrity" => HsmError::Integrity(message),
+        _ => HsmError::Unknown(message),
+    }
 }

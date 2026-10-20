@@ -1608,12 +1608,12 @@ dependencies = [
 [[package]]
 name = "curvine-alloc"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 
 [[package]]
 name = "curvine-client-core"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "async-stream",
  "bytes 1.11.1",
@@ -1651,7 +1651,7 @@ dependencies = [
 [[package]]
 name = "curvine-common-macros"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1661,7 +1661,7 @@ dependencies = [
 [[package]]
 name = "curvine-config"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "clap",
  "curvine-common-macros",
@@ -1685,7 +1685,7 @@ dependencies = [
 [[package]]
 name = "curvine-core-error"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bincode",
  "bytes 1.11.1",
@@ -1696,7 +1696,7 @@ dependencies = [
 [[package]]
 name = "curvine-data-transfer"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "axum",
  "bytes 1.11.1",
@@ -1743,7 +1743,7 @@ dependencies = [
 [[package]]
 name = "curvine-error"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "axum",
  "curvine-core-error",
@@ -1758,7 +1758,7 @@ dependencies = [
 [[package]]
 name = "curvine-fault"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "linkme",
  "parking_lot",
@@ -1770,7 +1770,7 @@ dependencies = [
 [[package]]
 name = "curvine-fs-api"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "async-stream",
  "bytes 1.11.1",
@@ -1793,7 +1793,7 @@ dependencies = [
 [[package]]
 name = "curvine-io"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bytes 1.11.1",
  "curvine-core-error",
@@ -1808,7 +1808,7 @@ dependencies = [
 [[package]]
 name = "curvine-job-client"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bincode",
  "curvine-client-core",
@@ -1830,11 +1830,13 @@ dependencies = [
 [[package]]
 name = "curvine-master"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "axum",
+ "blake3",
  "bytes 1.11.1",
  "curvine-alloc",
+ "curvine-client-core",
  "curvine-config",
  "curvine-core-error",
  "curvine-data-transfer",
@@ -1870,12 +1872,13 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
 name = "curvine-mds"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "async-trait",
  "curvine-config",
@@ -1892,7 +1895,7 @@ dependencies = [
 [[package]]
 name = "curvine-metrics"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "curvine-core-error",
  "dashmap 5.5.3",
@@ -1904,10 +1907,11 @@ dependencies = [
 [[package]]
 name = "curvine-model"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bincode",
  "bitflags 2.11.1",
+ "blake3",
  "chrono",
  "clap",
  "curvine-core-error",
@@ -1916,18 +1920,20 @@ dependencies = [
  "curvine-proto",
  "curvine-runtime",
  "curvine-sys",
+ "hsm-core 0.0.1 (git+https://github.com/JayTsu-sh/hsm-rs.git?rev=2909ceb71b7a1cd8e2db1238fcff9253761ad74d)",
  "indexmap",
  "log",
  "num_enum",
  "prost 0.11.9",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
 name = "curvine-net"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "curvine-core-error",
  "curvine-io",
@@ -1940,7 +1946,7 @@ dependencies = [
 [[package]]
 name = "curvine-proto"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "prost 0.11.9",
  "prost-build",
@@ -1950,7 +1956,7 @@ dependencies = [
 [[package]]
 name = "curvine-raft"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bincode",
  "bytes 1.11.1",
@@ -1981,7 +1987,7 @@ dependencies = [
 [[package]]
 name = "curvine-rocksdb"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "byteorder",
  "curvine-config",
@@ -1997,7 +2003,7 @@ dependencies = [
 [[package]]
 name = "curvine-rpc"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bytes 1.11.1",
  "curvine-core-error",
@@ -2017,7 +2023,7 @@ dependencies = [
 [[package]]
 name = "curvine-runtime"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bincode",
  "chrono",
@@ -2050,7 +2056,7 @@ dependencies = [
 [[package]]
 name = "curvine-server"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "axum",
  "bytes 1.11.1",
@@ -2098,7 +2104,7 @@ dependencies = [
 [[package]]
 name = "curvine-storage-local"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "byteorder",
  "bytes 1.11.1",
@@ -2117,7 +2123,7 @@ dependencies = [
 [[package]]
 name = "curvine-sys"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bytes 1.11.1",
  "curvine-runtime",
@@ -2135,7 +2141,7 @@ dependencies = [
 [[package]]
 name = "curvine-ufs-api"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "async-trait",
  "bytes 1.11.1",
@@ -2154,7 +2160,7 @@ dependencies = [
 [[package]]
 name = "curvine-ufs-opendal"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bytes 1.11.1",
  "curvine-core-error",
@@ -2172,7 +2178,7 @@ dependencies = [
 [[package]]
 name = "curvine-unified-fs"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "bytes 1.11.1",
  "curvine-client-core",
@@ -2194,7 +2200,7 @@ dependencies = [
 [[package]]
 name = "curvine-web"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "axum",
  "curvine-core-error",
@@ -2214,9 +2220,10 @@ dependencies = [
 [[package]]
 name = "curvine-worker"
 version = "0.2.2"
-source = "git+https://github.com/JayTsu-sh/curvine.git?rev=8cc0babc27a39aed5ad22c18d5f62562a6a0664c#8cc0babc27a39aed5ad22c18d5f62562a6a0664c"
+source = "git+https://github.com/JayTsu-sh/curvine.git?rev=b53bf69ae818a9143f4ff3792fd812ed747984a3#b53bf69ae818a9143f4ff3792fd812ed747984a3"
 dependencies = [
  "axum",
+ "blake3",
  "bytes 1.11.1",
  "curvine-alloc",
  "curvine-client-core",
@@ -2237,9 +2244,11 @@ dependencies = [
  "curvine-sys",
  "curvine-web",
  "dashmap 5.5.3",
+ "fs2",
  "log",
  "once_cell",
  "parking_lot",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -3337,6 +3346,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hsm-core"
+version = "0.0.1"
+source = "git+https://github.com/JayTsu-sh/hsm-rs.git?rev=2909ceb71b7a1cd8e2db1238fcff9253761ad74d#2909ceb71b7a1cd8e2db1238fcff9253761ad74d"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "hsm-curvine"
 version = "0.0.1"
 dependencies = [
@@ -3345,10 +3363,12 @@ dependencies = [
  "curvine-config",
  "curvine-error",
  "curvine-fs-api",
+ "curvine-model",
  "curvine-proto",
  "curvine-runtime",
  "curvine-server",
- "hsm-core",
+ "hsm-core 0.0.1",
+ "hsm-engine",
  "hsm-local",
  "serde",
  "serde_json",
@@ -3360,7 +3380,7 @@ dependencies = [
 name = "hsm-engine"
 version = "0.0.1"
 dependencies = [
- "hsm-core",
+ "hsm-core 0.0.1",
 ]
 
 [[package]]
@@ -3370,7 +3390,7 @@ dependencies = [
  "blake3",
  "data-mover",
  "fs2",
- "hsm-core",
+ "hsm-core 0.0.1",
  "hsm-engine",
  "serde",
  "serde_json",
