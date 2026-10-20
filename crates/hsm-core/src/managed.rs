@@ -324,6 +324,16 @@ pub trait ArchiveBackend: Send + Sync {
         key: &ArchiveKey,
         view: &DataView,
     ) -> impl Future<Output = HsmResult<ArchiveTarget>> + Send;
+    /// Reconcile a prior sealed attempt whose receipt publication was interrupted.
+    /// Only return a receipt after independently checking bytes and durability.
+    fn resume_commit(
+        &self,
+        _ctx: &OperationContext,
+        _target: &ArchiveTarget,
+        _view: &DataView,
+    ) -> impl Future<Output = HsmResult<Option<ArchiveReceipt>>> + Send {
+        async { Ok(None) }
+    }
     /// Verify bytes, apply durability barrier, publish immutable archive and receipt.
     fn commit(
         &self,

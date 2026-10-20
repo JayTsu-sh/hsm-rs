@@ -82,11 +82,16 @@ impl LocalArchive {
     }
 
     fn prepared_path(&self, ctx: &OperationContext, archive: &ArchiveKey) -> HsmResult<PathBuf> {
-        Ok(self
-            .0
-            .root
-            .join("attempts")
-            .join(format!("{}.json", key(&(ctx, archive))?)))
+        Ok(self.0.root.join("attempts").join(format!(
+            "{}.json",
+            key(&(
+                &OperationContext {
+                    controller_epoch: 1,
+                    ..ctx.clone()
+                },
+                archive
+            ))?
+        )))
     }
 
     fn committed(&self, archive: &ArchiveKey) -> HsmResult<Option<Committed>> {
@@ -116,6 +121,23 @@ impl LocalArchive {
 }
 
 impl ArchiveBackend for LocalArchive {
+    async fn resume_commit(
+        &self,
+        ctx: &OperationContext,
+        target: &ArchiveTarget,
+        view: &DataView,
+    ) -> HsmResult<Option<ArchiveReceipt>> {
+        let payload = decode_endpoint(&target.destination)?;
+        if !payload.root.join("sealed.json").exists() {
+            return Ok(None);
+        }
+        // commit checks ownership, fully reads back bytes and syncs publication.
+        let evidence = TransferEvidence {
+            length: view.length,
+            digest: view.digest.clone(),
+        };
+        self.commit(ctx, target, view, &evidence).await.map(Some)
+    }
     async fn inspect(&self, archive: &ArchiveKey) -> HsmResult<ArchiveStatus> {
         let _guard = self.0.serial.lock().await;
         Ok(match self.committed(archive)? {
@@ -138,7 +160,7 @@ impl ArchiveBackend for LocalArchive {
         let prepared_path = self.prepared_path(ctx, archive)?;
         if prepared_path.exists() {
             let prior: Prepared = decode(&fs::read(prepared_path)?)?;
-            if prior.context != *ctx || prior.key != *archive || prior.view != *view {
+            if !same_attempt(&prior.context, ctx) || prior.key != *archive || prior.view != *view {
                 return Err(HsmError::Conflict(
                     "archive attempt reused with different inputs".into(),
                 ));
@@ -172,7 +194,7 @@ impl ArchiveBackend for LocalArchive {
         ctx.validate()?;
         let _guard = self.0.serial.lock().await;
         let prior: Prepared = decode(&fs::read(self.prepared_path(ctx, &target.key)?)?)?;
-        if prior.context != *ctx || prior.target != *target || prior.view != *view {
+        if !same_attempt(&prior.context, ctx) || prior.target != *target || prior.view != *view {
             return Err(HsmError::Conflict("unowned archive target".into()));
         }
         if let Some(committed) = self.committed(&target.key)? {
@@ -231,5 +253,54 @@ impl ArchiveBackend for LocalArchive {
             return Err(HsmError::Integrity("receipt mismatch".into()));
         }
         Ok(actual.payload)
+    }
+}
+
+fn same_attempt(a: &OperationContext, b: &OperationContext) -> bool {
+    a.operation_id == b.operation_id && a.attempt_epoch == b.attempt_epoch
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{LocalDataMover, LocalStorage};
+    use hsm_core::{DataMover, ManagedStorage, Residency};
+    #[tokio::test]
+    async fn sealed_attempt_resumes_after_receipt_publication_gap_and_takeover() -> HsmResult<()> {
+        let root = tempfile::tempdir()?;
+        let source = LocalStorage::open(root.path().join("source"))?;
+        let state = source
+            .import("file", b"sealed data survives the commit gap")
+            .await?;
+        let ctx = OperationContext {
+            operation_id: "archive".into(),
+            controller_epoch: 1,
+            attempt_epoch: 1,
+        };
+        let view = source.prepare_archive(&ctx, &state.data).await?;
+        let archive = LocalArchive::open(root.path().join("archive"), "local")?;
+        let key = ArchiveKey {
+            backend: "local".into(),
+            object: "one".into(),
+        };
+        let target = archive.prepare(&ctx, &key, &view).await?;
+        LocalDataMover
+            .copy(&ctx, &view.source, &target.destination)
+            .await?;
+        let payload = decode_endpoint(&target.destination)?;
+        write_json(
+            &payload.root.join("sealed.json"),
+            &(&key, &view.data, &view.digest),
+        )?;
+        drop(archive);
+        let archive = LocalArchive::open(root.path().join("archive"), "local")?;
+        let mut next = ctx.clone();
+        next.controller_epoch = 2;
+        assert_eq!(archive.prepare(&next, &key, &view).await?, target);
+        let receipt = archive.resume_commit(&next, &target, &view).await?.unwrap();
+        assert_eq!(receipt.data, state.data);
+        let dual = source.commit_archive(&ctx, &view, &receipt).await?;
+        assert_eq!(dual.residency, Residency::Dual);
+        Ok(())
     }
 }

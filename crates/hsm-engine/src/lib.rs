@@ -50,9 +50,9 @@ impl<S: ManagedStorage + LifecycleStorage, B: ArchiveBackend, M: DataMover> HsmE
         let report = match result {
             Ok(report) => report,
             Err(error @ (HsmError::Unknown(_) | HsmError::Io(_))) => {
-                IntentCompletion::Retry(error.to_string())
+                IntentCompletion::Retry(error.to_string().chars().take(512).collect())
             }
-            Err(error) => IntentCompletion::Failed(error.to_string()),
+            Err(error) => IntentCompletion::Failed(error.to_string().chars().take(512).collect()),
         };
         let finish = OperationContext {
             operation_id: format!(
@@ -113,6 +113,10 @@ impl<S: ManagedStorage, B: ArchiveBackend, M: DataMover> HsmEngine<S, B, M> {
             ArchiveStatus::Committed(receipt) => *receipt,
             ArchiveStatus::Absent => {
                 let target = self.backend.prepare(ctx, key, &view).await?;
+                if let Some(receipt) = self.backend.resume_commit(ctx, &target, &view).await? {
+                    check_receipt(&receipt, data, key, view.length, &view.digest)?;
+                    return self.storage.commit_archive(ctx, &view, &receipt).await;
+                }
                 let evidence = self
                     .mover
                     .copy(ctx, &view.source, &target.destination)
