@@ -1,6 +1,8 @@
 # 本地文件后端与 Curvine 生命周期
 
-实现 v0.5。策略、候选筛选、任务、资格和 HSM 结果均在 Curvine 原权威域；hsm-rs 的外部 worker 只轮询和执行，data-mover-rs 负责字节搬运。本地 archive catalog 记录自己的不可变对象，不镜像源 namespace。当前不需要带库。
+本文保留 v0.5 原生 import 与显式策略动作的诊断操作。当前 v0.6 的普通 FUSE 自动纳管、周期容量/访问年龄策略及访问自动 Recall，应使用 [PVE-FUSE-HSM.md](PVE-FUSE-HSM.md)；架构与限制见 [DESIGN.md](DESIGN.md)。当前发布版本使用固定 Git 依赖和 Cargo.lock 构建，命令见 [VALIDATION.md](VALIDATION.md)。
+
+v0.5 原语诊断：策略、候选筛选、任务、资格和 HSM 结果均在 Curvine 原权威域；hsm-rs 的外部 worker 只轮询和执行，data-mover-rs 负责字节搬运。本地 archive catalog 记录自己的不可变对象，不镜像源 namespace。当前不需要带库。
 
 ## 一键运行
 

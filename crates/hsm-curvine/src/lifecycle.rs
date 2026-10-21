@@ -44,6 +44,41 @@ impl CurvineStorage<NativeControl> {
         )
         .await
     }
+    /// Interrupted source verification is resumed even if its original policy is disabled.
+    pub async fn pending_seals(&self) -> HsmResult<Vec<hsm_core::DataKey>> {
+        self.native_call(json!({"op":"pending_seals"}), "seals")
+            .await
+    }
+    /// Retry source-retired data deletion from the durable storage outbox.
+    pub async fn gc_batch(&self) -> HsmResult<usize> {
+        self.native_call(json!({"op":"gc_batch"}), "gc").await
+    }
+    /// Source maintains the cursor, interval and pressure latch across controller restarts.
+    pub async fn scan_scheduled(
+        &self,
+        ctx: &OperationContext,
+        id: &str,
+        limit: usize,
+    ) -> HsmResult<ScanBatch> {
+        self.native_call(
+            json!({"op":"policy_scan","context":ctx,"id":id,"limit":limit,"scheduled":true}),
+            "scan",
+        )
+        .await
+    }
+    /// Queue only contains Ready/Running work, with access recalls first.
+    pub async fn ready_intents(
+        &self,
+        ctx: &OperationContext,
+        after: Option<&str>,
+        limit: usize,
+    ) -> HsmResult<LifecyclePage<LifecycleIntent>> {
+        self.native_call(
+            json!({"op":"intent_list","context":ctx,"after":after,"limit":limit,"ready_only":true}),
+            "page",
+        )
+        .await
+    }
     /// Bounded durable task listing; no client-side namespace mirror.
     pub async fn intents(
         &self,

@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "普通读取自动 Recall · 按 1—12 执行",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-hsm-three-flows-20261020-170434/automatic-recall.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "ssh://git@localhost/work/jay/hsm/.archify/architecture-curvine-hsm-deployed-20261020-164157/evidence",
+      "revision": "ba8ad515ba73bf08a00c976857bc968851797ef4",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "frontend",
+      "label": "应用 · FUSE / SDK",
+      "sublabel": ".83 · 普通 open / read，等待恢复",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        300,
+        160
+      ],
+      "sources": [
+        {
+          "path": "curvine/crates/client/curvine-client-core/src/file/hsm_io.rs",
+          "line": 48,
+          "end_line": 89
+        },
+        {
+          "path": "deployment/summary.json",
+          "line": 1,
+          "end_line": 52
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "masters",
+      "type": "backend",
+      "label": "3 × Curvine Master",
+      "sublabel": "三 Master · 共享任务 / 原 inode 发布",
+      "pos": [
+        620,
+        40
+      ],
+      "size": [
+        320,
+        160
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-master/src/master/hsm/ordinary.rs",
+          "line": 1,
+          "end_line": 485
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm/lifecycle.rs",
+          "line": 1,
+          "end_line": 772
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm.rs",
+          "line": 1,
+          "end_line": 1520
+        }
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "hsm-rs 外部核心",
+      "sublabel": ".83 · Recall 优先领取 / 编排",
+      "pos": [
+        1200,
+        40
+      ],
+      "size": [
+        300,
+        160
+      ],
+      "sources": [
+        {
+          "path": "hsm-rs/crates/hsm-curvine/src/bin/hsm-curvine.rs",
+          "line": 388,
+          "end_line": 450
+        },
+        {
+          "path": "hsm-rs/crates/hsm-engine/src/lib.rs",
+          "line": 1,
+          "end_line": 265
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Curvine Worker 与在线盘",
+      "sublabel": "私有恢复 → Verify → Seal → 读取",
+      "pos": [
+        40,
+        450
+      ],
+      "size": [
+        300,
+        140
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-worker/src/worker/hsm.rs",
+          "line": 1,
+          "end_line": 377
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm.rs",
+          "line": 1285,
+          "end_line": 1365
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "mover",
+      "type": "backend",
+      "label": "data-mover-rs 执行器",
+      "sublabel": ".83 · 整文件 spool / 私有目标写入",
+      "pos": [
+        620,
+        450
+      ],
+      "size": [
+        320,
+        140
+      ],
+      "sources": [
+        {
+          "path": "hsm-rs/crates/hsm-curvine/src/managed_io.rs",
+          "line": 28,
+          "end_line": 258
+        },
+        {
+          "path": "hsm-rs/crates/hsm-local/src/executor.rs",
+          "line": 1,
+          "end_line": 72
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "archive",
+      "type": "database",
+      "label": "LocalArchive 与归档盘",
+      "sublabel": ".83 · 本地归档对象与有效回执",
+      "pos": [
+        1200,
+        450
+      ],
+      "size": [
+        300,
+        140
+      ],
+      "sources": [
+        {
+          "path": "hsm-rs/crates/hsm-local/src/archive.rs",
+          "line": 1,
+          "end_line": 306
+        },
+        {
+          "path": "hsm-rs/crates/hsm-curvine/src/managed_io.rs",
+          "line": 222,
+          "end_line": 258
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "step-1",
+      "from": "client",
+      "to": "masters",
+      "label": "1 · 离线读取：入队并等待",
+      "variant": "default"
+    },
+    {
+      "id": "step-2",
+      "from": "core",
+      "to": "masters",
+      "label": "2 · 优先领取共享 Recall",
+      "variant": "default"
+    },
+    {
+      "id": "step-3",
+      "from": "core",
+      "to": "archive",
+      "label": "3 · 校验恢复锚点",
+      "variant": "default"
+    },
+    {
+      "id": "step-4",
+      "from": "core",
+      "to": "masters",
+      "label": "4 · 申请私有恢复目标",
+      "variant": "default"
+    },
+    {
+      "id": "step-5",
+      "from": "masters",
+      "to": "workers",
+      "label": "5 · 分配私有布局",
+      "variant": "default"
+    },
+    {
+      "id": "step-6",
+      "from": "core",
+      "to": "mover",
+      "label": "6 · 下发恢复计划",
+      "variant": "default"
+    },
+    {
+      "id": "step-7",
+      "from": "archive",
+      "to": "mover",
+      "label": "7 · 读取已验证归档字节",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-8",
+      "from": "mover",
+      "to": "workers",
+      "label": "8 · 写入并 Verify",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-9",
+      "from": "core",
+      "to": "masters",
+      "label": "9 · 提交完整恢复证据",
+      "variant": "default"
+    },
+    {
+      "id": "step-10",
+      "from": "masters",
+      "to": "workers",
+      "label": "10 · Seal 封存并撤销写权限",
+      "variant": "default"
+    },
+    {
+      "id": "step-11",
+      "from": "masters",
+      "to": "client",
+      "label": "11 · 原 inode 发布 Dual",
+      "variant": "default"
+    },
+    {
+      "id": "step-12",
+      "from": "workers",
+      "to": "client",
+      "label": "12 · 原读取继续返回数据",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "1—4：读取触发与任务合并",
+      "items": [
+        "普通 open/read 发现 Offline 时创建或复用 __access_recall intent，应用等待；同一离线版本的并发读共享任务，无需显式 Recall 或 Recall 策略。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "5—10：私有恢复并封存",
+      "items": [
+        "分配与写入期间文件仍 Offline。data-mover 恢复整文件，验证长度/摘要；只有 Worker Seal 后才允许发布。校验失败不发布半成品。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "11—12：原调用继续",
+      "items": [
+        "Master 在原 inode 发布 Dual 并提供读取租约，原读取继续返回内容。PVE 四次并发普通读只生成两个 Recall Done，内容、inode 和 DataKey 保持。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "当前范围",
+      "items": [
+        "SDK 读等待最多 300 秒。Recall 私有布局目前单副本；核心和 mover 是 .83 同进程库，后端为本地文件，带库尚未接入。"
+      ]
+    }
+  ]
+}

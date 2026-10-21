@@ -1,0 +1,23 @@
+{
+  "id": "cold-local",
+  "revision": 1,
+  "enabled": true,
+  "prefix": "/data/",
+  "min_size": 1048576,
+  "max_size": null,
+  "min_residency_ms": 60000,
+  "action": "release",
+  "backend": "local",
+  "selection": {
+    "scan_interval_ms": 60000,
+    "scan_budget": 4096,
+    "max_candidates": 128,
+    "access_age_weight": 1,
+    "min_access_age_ms": 86400000,
+    "min_modify_age_ms": 300000,
+    "exclude_prefixes": ["/data/tmp/"],
+    "owner": null,
+    "group": null,
+    "capacity": {"high_basis_points": 8000, "low_basis_points": 6000}
+  }
+}

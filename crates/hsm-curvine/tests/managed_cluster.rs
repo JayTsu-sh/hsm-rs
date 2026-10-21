@@ -9,7 +9,7 @@ use curvine_server::test::MiniCluster;
 use hsm_core::{
     ArchiveKey, DataMover, HsmError, ManagedStorage, OperationContext, Residency, TransferEvidence,
 };
-use hsm_curvine::{CurvineDataMover, CurvineStorage, NativeControl};
+use hsm_curvine::{ControlTransport, CurvineDataMover, CurvineStorage, NativeControl};
 use hsm_engine::HsmEngine;
 use hsm_local::{LocalArchive, LocalDataMover};
 use std::{
@@ -198,7 +198,13 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         assert!(fs.append(&path).await.is_err());assert!(fs.create(&path,true).await.is_err());
         assert!(fs.delete(&parent,true).await.is_err());assert!(fs.free(&parent,true).await.is_err());
         assert!(fs.rename(&parent,&curvine_fs_api::Path::from_str("/moved")?).await.is_err());
-        assert!(fs.open(&path).await.is_err()); // legacy data access must fail, never return holes.
+        use curvine_fs_api::Reader;
+        let mut ordinary = fs.open(&path).await?;
+        let mut received = vec![];
+        while ordinary.has_remaining() { received.extend_from_slice(ordinary.async_read(None).await?.as_slice()); }
+        ordinary.complete().await?;
+        assert_eq!(received, bytes);
+        let initial = storage.inspect(&initial.data.entity).await?;
         let read=destination(root.path(),"before")?;
         storage.read_to_local(&context("read-before"),&initial.data,&read).await?;
         assert_eq!(fs::read(root.path().join("before/data"))?,bytes);
@@ -217,9 +223,8 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         assert_eq!(engine.archive(&context("archive"),&initial.data,&key).await?,dual);
         assert_eq!(storage.pending_view(&context("held-pin"),&initial.data.entity).await?,pin);
         storage.close_view(&context("held-pin"),&pin).await?;
-        // A definite Busy result remains the same after the condition changes.
-        assert!(matches!(engine.release(&context("busy-release"),&dual).await,Err(HsmError::Busy(_))));
-        let offline=engine.release(&context("release"),&dual).await?;
+        // Reader/source pins are transient; the same workflow can retry after close.
+        let offline=engine.release(&context("busy-release"),&dual).await?;
         assert_eq!(offline.residency,Residency::Offline);
         storage.collect_garbage(&initial.data.entity).await?;
         let old_endpoint:Endpoint=serde_json::from_slice(&pin.source.capability)?;
@@ -235,7 +240,7 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         processes.restart(&old_leader)?;
         eprintln!("phase: restarted on another leader");
         assert_eq!(storage.inspect(&initial.data.entity).await?,offline);
-        assert_eq!(engine.release(&context("release"),&dual).await?,offline);
+        assert_eq!(engine.release(&context("busy-release"),&dual).await?,offline);
         let bad=storage.prepare_recall(&context("bad-recall"),&offline,&offline.anchors[0]).await?;
         assert_eq!(storage.pending_recall(&context("bad-recall"),&initial.data.entity).await?,bad);
         let endpoint:Endpoint=serde_json::from_slice(&bad.destination.capability)?;
@@ -300,6 +305,7 @@ fn policy_file(
     min_size: u64,
 ) -> Result<hsm_core::LifecyclePolicy> {
     let policy = hsm_core::LifecyclePolicy {
+        selection: Default::default(),
         id: id.into(),
         revision: 1,
         enabled: true,
@@ -756,4 +762,351 @@ fn local_file_policies_survive_takeover_and_execute_through_cli() -> Result {
         "Online"
     );
     Ok(())
+}
+
+/// Normal SDK I/O uses the same path as FUSE: no native import and no Recall policy.
+#[test]
+fn ordinary_files_are_tiered_by_policy_and_recalled_by_concurrent_reads() -> Result {
+    use curvine_fs_api::{Path as CvPath, Reader, Writer};
+    use hsm_core::{LifecyclePolicy, PolicyAction, PolicySelection};
+    struct WorkerProcess(Child);
+    impl Drop for WorkerProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let _cluster = ProcessCluster::start(root.path())?;
+    let (masters, _): (Vec<ClusterConf>, Vec<ClusterConf>) =
+        serde_json::from_slice(&fs::read(root.path().join("cluster.json"))?)?;
+    let config = root.path().join("client.json");
+    fs::write(&config, serde_json::to_vec(&masters[0])?)?;
+    let rt = Arc::new(masters[0].client_rpc_conf().create_runtime());
+    let source = CurvineFileSystem::with_rt(masters[0].clone(), rt.clone())?;
+    rt.block_on(async {
+        let storage = CurvineStorage::connect(NativeControl::new(source.clone())).await?;
+        let epoch = storage.controller_epoch().await?;
+        let ctx = |id: &str| OperationContext {
+            operation_id: id.into(),
+            controller_epoch: epoch,
+            attempt_epoch: 1,
+        };
+        source.mkdir(&CvPath::from_str("/ordinary")?, true).await?;
+        let a: Vec<u8> = (0..2 * 1024 * 1024 + 19).map(|i| (i % 251) as u8).collect();
+        let b: Vec<u8> = (0..1024 * 1024 + 71).map(|i| (i % 239) as u8).collect();
+        for (name, bytes) in [
+            ("a", a.as_slice()),
+            ("b", b.as_slice()),
+            ("small", b"small".as_slice()),
+            ("excluded", a.as_slice()),
+        ] {
+            let mut writer = source
+                .create(&CvPath::from_str(format!("/ordinary/{name}"))?, false)
+                .await?;
+            writer.write(bytes).await?;
+            writer.complete().await?;
+        }
+        let initial = storage.resolve("/ordinary/a").await?;
+        assert_eq!(initial.residency, Residency::Online);
+        assert_eq!(initial.digest.algorithm, "unsealed");
+        // Simulate a coordinator stopping after it pins a selected native generation.
+        // The new CLI worker must find and resume this source-owned seal.
+        let token = format!(
+            "seal-{}-{}",
+            initial.data.entity.entity, initial.data.generation
+        );
+        let pinned = NativeControl::new(source.clone())
+            .exchange(serde_json::to_vec(&serde_json::json!({
+                "op":"seal_begin", "entity":initial.data.entity, "data":initial.data, "token":token
+            }))?)
+            .await?;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&pinned)?["kind"],
+            "blocks"
+        );
+        // No policy exists yet: a fresh process must finish the persisted seal independently.
+        cli(root.path(), &["worker", "--once"], true)?;
+        assert_eq!(
+            storage.resolve("/ordinary/a").await?.digest.algorithm,
+            "blake3"
+        );
+        let policy = LifecyclePolicy {
+            id: "ordinary-release".into(),
+            revision: 1,
+            enabled: true,
+            prefix: "/ordinary/".into(),
+            min_size: 1024 * 1024,
+            max_size: None,
+            min_residency_ms: 0,
+            action: PolicyAction::Release,
+            backend: "local".into(),
+            selection: PolicySelection {
+                scan_interval_ms: 100,
+                min_access_age_ms: 3000,
+                exclude_prefixes: vec!["/ordinary/excluded".into()],
+                ..Default::default()
+            },
+        };
+        storage
+            .put_policy(&ctx("ordinary-policy"), &policy, None)
+            .await?;
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.path().join("worker.log"))?;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hsm-curvine"));
+        command
+            .arg("--config")
+            .arg(&config)
+            .arg("--archive-root")
+            .arg(root.path().join("archive"))
+            .args(["worker", "--poll-ms", "100"])
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log));
+        let _worker = WorkerProcess(command.spawn()?);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if storage.resolve("/ordinary/a").await?.residency == Residency::Offline
+                && storage.resolve("/ordinary/b").await?.residency == Residency::Offline
+            {
+                break;
+            }
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "ordinary release timeout: {}",
+                    fs::read_to_string(root.path().join("worker.log"))?
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            storage.resolve("/ordinary/small").await?.residency,
+            Residency::Online
+        );
+        assert_eq!(
+            storage.resolve("/ordinary/excluded").await?.residency,
+            Residency::Online
+        );
+        async fn read_all(fs: &CurvineFileSystem, path: &str) -> Result<Vec<u8>> {
+            let mut reader = fs.open(&CvPath::from_str(path)?).await?;
+            let mut bytes = vec![];
+            while reader.has_remaining() {
+                bytes.extend_from_slice(reader.async_read(None).await?.as_slice());
+            }
+            reader.complete().await?;
+            Ok(bytes)
+        }
+        // The application only reads; the storage authority creates the Recall intent.
+        let (one, two, three) = tokio::join!(
+            read_all(&source, "/ordinary/a"),
+            read_all(&source, "/ordinary/a"),
+            read_all(&source, "/ordinary/b")
+        );
+        assert_eq!(one?, a);
+        assert_eq!(two?, a);
+        assert_eq!(three?, b);
+        let recalled = storage.resolve("/ordinary/a").await?;
+        assert_eq!(recalled.data, initial.data);
+        assert_eq!(recalled.residency, Residency::Dual);
+        // Stop further cold release while checking ordinary replacement semantics.
+        let mut disabled = policy;
+        disabled.enabled = false;
+        disabled.revision = 2;
+        storage
+            .put_policy(&ctx("disable-ordinary-policy"), &disabled, Some(1))
+            .await?;
+        let replacement = b"new ordinary generation after recall";
+        let mut writer = source
+            .create(&CvPath::from_str("/ordinary/a")?, true)
+            .await?;
+        writer.write(replacement).await?;
+        writer.complete().await?;
+        assert_eq!(read_all(&source, "/ordinary/a").await?, replacement);
+        let rewritten = storage.resolve("/ordinary/a").await?;
+        assert!(rewritten.data.generation > initial.data.generation);
+        assert!(rewritten.anchors.is_empty());
+        assert_eq!(rewritten.residency, Residency::Online);
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+}
+
+#[test]
+fn ordinary_access_fences_stale_release_and_allows_later_readmission() -> Result {
+    use curvine_fs_api::{Path as CvPath, Reader, Writer};
+    use hsm_core::{IntentStatus, LifecyclePolicy, PolicyAction, PolicySelection};
+    let root = tempfile::tempdir()?;
+    let _cluster = ProcessCluster::start(root.path())?;
+    let (masters, _): (Vec<ClusterConf>, Vec<ClusterConf>) =
+        serde_json::from_slice(&fs::read(root.path().join("cluster.json"))?)?;
+    let rt = Arc::new(masters[0].client_rpc_conf().create_runtime());
+    let source = CurvineFileSystem::with_rt(masters[0].clone(), rt.clone())?;
+    rt.block_on(async {
+        let storage = CurvineStorage::connect(NativeControl::new(source.clone())).await?;
+        let epoch = storage.controller_epoch().await?;
+        let ctx = |id: &str| OperationContext {
+            operation_id: id.into(),
+            controller_epoch: epoch,
+            attempt_epoch: 1,
+        };
+        let path = CvPath::from_str("/read-fence")?;
+        let mut writer = source.create(&path, false).await?;
+        writer.write(&vec![73; 1024 * 1024]).await?;
+        writer.complete().await?;
+        let initial = storage.resolve("/read-fence").await?;
+        storage.seal_ordinary(&initial.data).await?;
+        let compact = storage
+            .prepare_archive(&ctx("compact-view-probe"), &initial.data)
+            .await?;
+        assert_eq!(compact.source.adapter, "curvine-block-view-v2");
+        assert!(compact.source.capability.len() < 1024);
+        storage
+            .close_view(&ctx("compact-view-probe"), &compact)
+            .await?;
+        let stale = destination(root.path(), "stale-compact-view")?;
+        assert!(matches!(
+            CurvineDataMover::new(source.clone())
+                .copy(&ctx("stale-compact-copy"), &compact.source, &stale)
+                .await,
+            Err(HsmError::Fenced)
+        ));
+        let engine = HsmEngine::new(
+            storage.clone(),
+            LocalArchive::open(root.path().join("archive"), "local")?,
+            CurvineDataMover::new(source.clone()),
+        );
+        let dual = engine
+            .archive(
+                &ctx("archive-read-fence"),
+                &initial.data,
+                &ArchiveKey {
+                    backend: "local".into(),
+                    object: "read-fence".into(),
+                },
+            )
+            .await?;
+        let policy = LifecyclePolicy {
+            id: "read-fence".into(),
+            revision: 1,
+            enabled: true,
+            prefix: "/read-fence".into(),
+            min_size: 1,
+            max_size: None,
+            min_residency_ms: 0,
+            action: PolicyAction::Release,
+            backend: "local".into(),
+            selection: PolicySelection {
+                min_access_age_ms: 500,
+                ..Default::default()
+            },
+        };
+        storage
+            .put_policy(&ctx("read-fence-policy"), &policy, None)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let batch = storage
+            .scan_policy(&ctx("before-access-scan"), "read-fence", None, 16)
+            .await?;
+        assert_eq!(batch.admitted.len(), 1);
+        let mut reader = source.open(&path).await?;
+        assert!(!reader.async_read(Some(1)).await?.is_empty());
+        reader.complete().await?;
+        let observed = storage.resolve("/read-fence").await?;
+        assert!(observed.revision > dual.revision);
+        assert_eq!(observed.residency, Residency::Dual);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let superseded = engine
+            .run_intent(
+                &ctx("claim-stale-release"),
+                &batch.admitted[0],
+                "reader-test",
+            )
+            .await?;
+        assert_eq!(superseded.status, IntentStatus::Superseded);
+        assert_eq!(
+            storage.resolve("/read-fence").await?.residency,
+            Residency::Dual
+        );
+        let next = storage
+            .scan_policy(&ctx("after-access-scan"), "read-fence", None, 16)
+            .await?;
+        assert_eq!(next.admitted.len(), 1);
+        assert_ne!(next.admitted[0], batch.admitted[0]);
+        let done = engine
+            .run_intent(
+                &ctx("claim-fresh-release"),
+                &next.admitted[0],
+                "reader-test",
+            )
+            .await?;
+        assert_eq!(done.status, IntentStatus::Done);
+        assert_eq!(
+            storage.resolve("/read-fence").await?.residency,
+            Residency::Offline
+        );
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
+}
+
+#[test]
+fn ordinary_rename_and_truncate_preserve_authority_after_leader_restart() -> Result {
+    use curvine_fs_api::{Path as CvPath, Reader, Writer};
+    let root = tempfile::tempdir()?;
+    let mut cluster = ProcessCluster::start(root.path())?;
+    let (masters, _): (Vec<ClusterConf>, Vec<ClusterConf>) =
+        serde_json::from_slice(&fs::read(root.path().join("cluster.json"))?)?;
+    let rt = Arc::new(masters[0].client_rpc_conf().create_runtime());
+    let source = CurvineFileSystem::with_rt(masters[0].clone(), rt.clone())?;
+    rt.block_on(async {
+        let storage = CurvineStorage::connect(NativeControl::new(source.clone())).await?;
+        storage.controller_epoch().await?;
+        let path = CvPath::from_str("/ordinary-before-rename")?;
+        let renamed = CvPath::from_str("/ordinary-after-rename")?;
+        let mut writer = source.create(&path, false).await?;
+        writer.write(&vec![31; 1024 * 1024]).await?;
+        writer.complete().await?;
+        let initial = storage.resolve(path.path()).await?;
+        storage.seal_ordinary(&initial.data).await?;
+        let engine = HsmEngine::new(
+            storage.clone(),
+            LocalArchive::open(root.path().join("archive"), "local")?,
+            CurvineDataMover::new(source.clone()),
+        );
+        let dual = engine
+            .archive(
+                &context("archive-before-rename"),
+                &initial.data,
+                &ArchiveKey {
+                    backend: "local".into(),
+                    object: "rename-truncate".into(),
+                },
+            )
+            .await?;
+        source.rename(&path, &renamed).await?;
+        let moved = storage.resolve(renamed.path()).await?;
+        assert_eq!(moved.data, dual.data);
+        assert_eq!(moved.residency, Residency::Dual);
+        source
+            .resize(&renamed, curvine_model::FileAllocOpts::with_truncate(4096))
+            .await?;
+        let changed = storage.resolve(renamed.path()).await?;
+        assert!(changed.data.generation > initial.data.generation);
+        assert_eq!(changed.length, 4096);
+        assert!(changed.anchors.is_empty());
+        assert_eq!(changed.residency, Residency::Online);
+        let leader = source.get_filesystem_info().await?.active_master;
+        cluster.restart(&leader)?;
+        assert_eq!(storage.resolve(renamed.path()).await?, changed);
+        let mut reader = source.open(&renamed).await?;
+        let mut bytes = vec![];
+        while reader.has_remaining() {
+            bytes.extend_from_slice(reader.async_read(None).await?.as_slice());
+        }
+        reader.complete().await?;
+        assert_eq!(bytes, vec![31; 4096]);
+        source.delete(&renamed, false).await?;
+        assert!(storage.resolve(renamed.path()).await.is_err());
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })
 }

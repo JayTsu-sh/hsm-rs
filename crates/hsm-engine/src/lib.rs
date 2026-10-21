@@ -49,7 +49,7 @@ impl<S: ManagedStorage + LifecycleStorage, B: ArchiveBackend, M: DataMover> HsmE
         .await;
         let report = match result {
             Ok(report) => report,
-            Err(error @ (HsmError::Unknown(_) | HsmError::Io(_))) => {
+            Err(error @ (HsmError::Unknown(_) | HsmError::Io(_) | HsmError::Busy(_))) => {
                 IntentCompletion::Retry(error.to_string().chars().take(512).collect())
             }
             Err(error) => IntentCompletion::Failed(error.to_string().chars().take(512).collect()),

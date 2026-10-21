@@ -1,0 +1,396 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "策略与 Release · 按 1—11 执行",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-hsm-three-flows-20261020-170434/policy-release.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "ssh://git@localhost/work/jay/hsm/.archify/architecture-curvine-hsm-deployed-20261020-164157/evidence",
+      "revision": "ba8ad515ba73bf08a00c976857bc968851797ef4",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "masters",
+      "type": "backend",
+      "label": "3 × Curvine Master",
+      "sublabel": "三 Master · 索引筛选 / Dual / Offline",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        320,
+        160
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-master/src/master/hsm/ordinary.rs",
+          "line": 1,
+          "end_line": 485
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm/lifecycle.rs",
+          "line": 1,
+          "end_line": 772
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm.rs",
+          "line": 1,
+          "end_line": 1520
+        }
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "hsm-rs 外部核心",
+      "sublabel": ".83 · 周期扫描 / 领取 / 外部编排",
+      "pos": [
+        600,
+        40
+      ],
+      "size": [
+        320,
+        160
+      ],
+      "sources": [
+        {
+          "path": "hsm-rs/crates/hsm-curvine/src/bin/hsm-curvine.rs",
+          "line": 388,
+          "end_line": 450
+        },
+        {
+          "path": "hsm-rs/crates/hsm-engine/src/lib.rs",
+          "line": 1,
+          "end_line": 265
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Curvine Worker 与在线盘",
+      "sublabel": "三 Worker · 普通块两副本 / 异步 GC",
+      "pos": [
+        40,
+        430
+      ],
+      "size": [
+        320,
+        140
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-worker/src/worker/hsm.rs",
+          "line": 1,
+          "end_line": 377
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm.rs",
+          "line": 1285,
+          "end_line": 1365
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "mover",
+      "type": "backend",
+      "label": "data-mover-rs 执行器",
+      "sublabel": ".83 · 固定视图 / spool / 数据搬运",
+      "pos": [
+        600,
+        430
+      ],
+      "size": [
+        320,
+        140
+      ],
+      "sources": [
+        {
+          "path": "hsm-rs/crates/hsm-curvine/src/managed_io.rs",
+          "line": 28,
+          "end_line": 258
+        },
+        {
+          "path": "hsm-rs/crates/hsm-local/src/executor.rs",
+          "line": 1,
+          "end_line": 72
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    },
+    {
+      "id": "archive",
+      "type": "database",
+      "label": "LocalArchive 与归档盘",
+      "sublabel": ".83 · 校验 / fsync / 归档回执",
+      "pos": [
+        1160,
+        430
+      ],
+      "size": [
+        300,
+        140
+      ],
+      "sources": [
+        {
+          "path": "hsm-rs/crates/hsm-local/src/archive.rs",
+          "line": 1,
+          "end_line": 306
+        },
+        {
+          "path": "hsm-rs/crates/hsm-curvine/src/managed_io.rs",
+          "line": 222,
+          "end_line": 258
+        },
+        {
+          "path": "docs/hsm-deployment-design.md",
+          "line": 1,
+          "end_line": 73
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "step-1",
+      "from": "core",
+      "to": "masters",
+      "label": "1 · 周期触发策略筛选",
+      "variant": "default",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          560,
+          120
+        ],
+        [
+          560,
+          65
+        ],
+        [
+          400,
+          65
+        ],
+        [
+          400,
+          120
+        ]
+      ],
+      "labelAt": [
+        480,
+        55
+      ]
+    },
+    {
+      "id": "step-2",
+      "from": "masters",
+      "to": "core",
+      "label": "2 · 返回候选与持久任务",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          400,
+          120
+        ],
+        [
+          400,
+          100
+        ],
+        [
+          560,
+          100
+        ],
+        [
+          560,
+          120
+        ]
+      ],
+      "labelAt": [
+        480,
+        90
+      ]
+    },
+    {
+      "id": "step-3",
+      "from": "core",
+      "to": "masters",
+      "label": "3 · 领取任务，保护固定视图",
+      "variant": "default",
+      "labelAt": [
+        480,
+        135
+      ],
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          560,
+          120
+        ],
+        [
+          560,
+          145
+        ],
+        [
+          400,
+          145
+        ],
+        [
+          400,
+          120
+        ]
+      ]
+    },
+    {
+      "id": "step-4",
+      "from": "core",
+      "to": "mover",
+      "label": "4 · 执行归档计划",
+      "variant": "default"
+    },
+    {
+      "id": "step-5",
+      "from": "workers",
+      "to": "mover",
+      "label": "5 · 读取固定版本字节",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-6",
+      "from": "mover",
+      "to": "archive",
+      "label": "6 · 搬运完整归档数据",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-7",
+      "from": "archive",
+      "to": "core",
+      "label": "7 · 校验并持久化回执",
+      "variant": "default"
+    },
+    {
+      "id": "step-8",
+      "from": "core",
+      "to": "masters",
+      "label": "8 · 登记锚点，发布 Dual",
+      "variant": "default",
+      "labelAt": [
+        480,
+        175
+      ],
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          560,
+          120
+        ],
+        [
+          560,
+          185
+        ],
+        [
+          400,
+          185
+        ],
+        [
+          400,
+          120
+        ]
+      ]
+    },
+    {
+      "id": "step-9",
+      "from": "core",
+      "to": "archive",
+      "label": "9 · 后续 Release 复核归档",
+      "variant": "default"
+    },
+    {
+      "id": "step-10",
+      "from": "core",
+      "to": "masters",
+      "label": "10 · 条件释放，提交 Offline",
+      "variant": "default",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [
+        [
+          560,
+          120
+        ],
+        [
+          560,
+          225
+        ],
+        [
+          400,
+          225
+        ],
+        [
+          400,
+          120
+        ]
+      ],
+      "labelAt": [
+        480,
+        215
+      ]
+    },
+    {
+      "id": "step-11",
+      "from": "masters",
+      "to": "workers",
+      "label": "11 · 异步回收全部旧副本",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "1—3：策略与候选",
+      "items": [
+        "高/低水位、访问年龄权重、大小、路径和 owner/group 等条件；按驻留状态/atime/inode 索引筛选，持久游标和预算限制每轮工作。",
+        "未关闭、有读取租约或归档保护的文件不允许释放；领取和提交时重新检查源观察。"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "4—8：先形成可恢复归档",
+      "items": [
+        "data-mover 从固定源视图搬运字节；LocalArchive 校验、fsync 并返回回执后，Curvine 登记锚点，Online → Dual。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "9—11：再释放在线布局",
+      "items": [
+        "后续扫描生成独立 Release 任务，第 9 步再次核验后端；第 10 步由 Curvine 原子提交 Offline、GC outbox 和原始结果，第 11 步 Worker 物理回收。",
+        "Release 原语不调用 data-mover；Done 与物理 GC 分开。PVE 实测 A/B 双副本回收 29,360,224 字节。"
+      ]
+    }
+  ]
+}

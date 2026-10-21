@@ -1,6 +1,6 @@
 # Curvine 原生 HSM Adapter
 
-当前支持新建、不可变 `/.hsm/<name>` 文件的 **Archive → Release → Recall** 闭环。hsm-rs 协调工作流，Curvine 保存复制的权威记录和原始结果，data-mover-rs 搬运，LocalArchive 断言后端提交。没有外部全量 namespace 镜像，没有旧文件系统兼容路径。
+当前支持普通 FUSE 文件自动纳管、策略驱动归档释放，以及普通读取触发的整文件自动 Recall。原生不可变 `/.hsm/<name>` import 继续用于原语诊断。hsm-rs 协调工作流，Curvine 保存复制的权威记录和原始结果，data-mover-rs 搬运，LocalArchive 断言后端提交。没有外部全量 namespace 镜像，没有旧文件系统兼容路径。
 
 策略/任务、CLI、一键本地集群场景及恢复步骤见 [本地 HSM 与生命周期](../../docs/LOCAL-HSM.md)。
 
@@ -17,9 +17,9 @@ writer_channel_size = 0
 leader_create_snapshot = false
 ```
 
-必须 `testing=false`。Master 以 `hsm-format-v1` 标记该卷的格式要求；不能在已有 HSM 卷上关闭该开关。首次状态请求通过提交日志创建保留目录 `/.hsm`；该目录应事先不存在。这里只支持直接子文件。普通 SDK 的创建/修改/open 不能进入这个作用域；读数据使用下面的完整文件 view 接口。其他 namespace 保持原来的路径。
+必须 `testing=false`。Master 以 `hsm-format-v1` 标记该卷的格式要求；不能在已有 HSM 卷上关闭该开关。首次状态请求通过提交日志创建保留目录 `/.hsm`；该目录应事先不存在。该保留目录的创建和修改仍走原生接口；标准使用方式是在普通目录通过 FUSE 写入。单硬链接、非 UFS 常规文件自动进入存储侧 HSM 记录。全部 Master、FUSE 与 SDK 应一起升级，不能混用旧的受管读取路径。
 
-原生能力包括 committed records、稳定 view、条件 Release、私有 Recall 和持久成功结果；至少三 Master 的配置报告 distributed_authority。容量预留、透明 Recall 为 false，使用者应显式 Recall。本地 archive 的 `local-fsync-v1` 不是介质或整机 HA 承诺。
+原生能力包括 committed records、稳定 view、条件 Release、私有 Recall 和持久成功结果；至少三 Master 的配置报告 distributed_authority。透明 Recall 为 true；普通读取自动排队并等待恢复。容量预留仍为 false。本地 archive 的 `local-fsync-v1` 不是介质或整机 HA 承诺。
 
 ## 组合
 
@@ -39,7 +39,7 @@ let restored = engine.recall(&ctx("recall"), &offline, &key).await?;
 assert_eq!(restored.data, initial.data);
 ```
 
-`ctx` 产生稳定、全局唯一工作流 ID、当前 controller epoch、attempt epoch 1。不同动作使用不同 ID，重试同一动作保持 ID 和输入；确定失败后改变条件重试应使用新 ID。`controller_epoch()` 读取资格，接管时 `claim_controller(ctx, expected_epoch)` 条件提升；旧 epoch 不能修改存储。归档 Key 独立于 attempt 和物理位置。
+`ctx` 产生稳定、全局唯一工作流 ID、当前 controller epoch、attempt epoch 1。不同动作使用不同 ID，重试同一动作保持 ID 和输入。Curvine 的临时 Busy 可以在保护解除后重试；源观察变化会终止旧任务，再按新观察入队。`controller_epoch()` 读取资格，接管时 `claim_controller(ctx, expected_epoch)` 条件提升；旧 epoch 不能修改存储。归档 Key 独立于 attempt 和物理位置。
 
 `resolve(path)` 获取原生 DataKey；`read_to_local(ctx, data, destination)` 取得持久 pin、复制并关闭 view；`collect_garbage(entity)` 重试 committed GC。协调者重开后可通过 `pending_view` / `pending_recall` 找到 pin/私有布局，停止旧 I/O 后 `close_view` / `abort_recall`。这些事实全部来自 Curvine。
 
@@ -52,14 +52,15 @@ Worker 按块接收，重复前缀必须内容一致，Verify 独立读取完整
 默认无 native feature，只编译协议 Adapter 和通用合同测试。`native` 引入 SDK/执行器；`native-integration` 额外引入 server 测试 harness，不属于生产客户端依赖。
 
 ```sh
-cargo test --workspace --locked
-CXXFLAGS=-g0 cargo test --workspace --features hsm-curvine/native-integration --locked -j 6
-CXXFLAGS=-g0 cargo clippy --workspace --all-targets \
-  --features hsm-curvine/native-integration --locked -j 6 -- -D warnings
+CXXFLAGS=-g0 cargo test --workspace --locked \
+  --features hsm-curvine/native-integration -j 6
+cargo fmt --all --check
 ```
 
 需要 Rust/C++ 工具链、protoc、Clang/libclang；`CXXFLAGS=-g0` 减少 RocksDB C++ 调试信息。managed_cluster 启动真实三 Master/单 Worker 子进程，三次强制重启均排除旧 leader，保留实际数据目录；验证完整字节、身份、原始结果、pin、epoch、物理 GC 和坏 Recall 不发布。ignore 的 process_cluster_child 只由测试父进程启动。
 
 普通 `copy_current_file_to_local` 仍是独立诊断 helper，不参与此闭环，也不会构造稳定 view 或授权释放。
 
-当前不支持存量普通文件直接转管、可变文件、嵌套 managed 目录、attempt > 1、访问热度/容量水位策略、透明 offline 访问、容量预留、普通 Worker 块统计/副本修复、SPDK 或磁带。未验证断电、盘损坏和全部故障矩阵；初版不自动清除失败 import/pin/private layout，避免把未知结果误当失败。
+策略字段、元数据索引、容量水位、周期预算、普通写入钩子及访问触发过程见 [实现设计](../../docs/DESIGN.md)。配置和跨节点实测见 [验收记录](../../docs/VALIDATION.md)。
+
+当前仍不提供完整 GPFS 策略文本解析、恢复布局上的追加写、受管硬链接、硬容量预留或磁带后端。Recall 的私有 Worker 布局仍为单副本。没有完整断电、盘损坏和生产故障矩阵验证；失败资源的保护以存储事实为准。

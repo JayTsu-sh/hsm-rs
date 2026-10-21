@@ -1,6 +1,7 @@
 //! Native immutable managed files and protected Worker data transfer.
 use crate::{ControlTransport, CurvineStorage, NativeControl};
-use curvine_client_core::file::{CurvineFileSystem, hsm_io::hsm_worker_rpc};
+use curvine_client_core::file::{CurvineFileSystem, FsReader, hsm_io::hsm_worker_rpc};
+use curvine_fs_api::{Path as CvPath, Reader};
 use curvine_model::hsm::native::{CHUNK_BYTES, Endpoint, WorkerReply, WorkerRequest};
 use hsm_core::{
     ContentDigest, DataEndpoint, DataKey, DataMover, DataView, EntityKey, EntityState, HsmError,
@@ -25,6 +26,84 @@ impl CurvineDataMover {
         Self { fs }
     }
     async fn download(&self, source: &DataEndpoint, root: &Path) -> HsmResult<TransferEvidence> {
+        if matches!(
+            source.adapter.as_str(),
+            "curvine-block-view-v1" | "curvine-block-view-v2"
+        ) {
+            let blocks: curvine_model::FileBlocks = if source.adapter == "curvine-block-view-v2" {
+                let response = self
+                    .fs
+                    .hsm_control(curvine_proto::HsmControlRequest {
+                        protocol_version: 1,
+                        payload: serde_json::to_vec(
+                            &json!({"op":"view_blocks","capability":source.capability}),
+                        )
+                        .map_err(|e| HsmError::Invalid(e.to_string()))?,
+                    })
+                    .await
+                    .map_err(|e| HsmError::Unknown(e.to_string()))?;
+                let value: Value = serde_json::from_slice(&response.payload)
+                    .map_err(|e| HsmError::Unknown(e.to_string()))?;
+                if value["kind"] == "error" {
+                    return Err(crate::remote_error(
+                        value["data"]["code"].as_str().unwrap_or("unknown"),
+                        value["data"]["message"]
+                            .as_str()
+                            .unwrap_or("view lookup failed")
+                            .into(),
+                    ));
+                }
+                if value["kind"] != "blocks" {
+                    return Err(HsmError::Integrity(
+                        "invalid protected block view response".into(),
+                    ));
+                }
+                serde_json::from_value(value["data"].clone())
+                    .map_err(|e| HsmError::Integrity(e.to_string()))?
+            } else {
+                // Read only persisted v1 views from an interrupted pre-upgrade workflow.
+                serde_json::from_slice(&source.capability)
+                    .map_err(|e| HsmError::Invalid(e.to_string()))?
+            };
+            let mut reader = FsReader::new(
+                CvPath::from_str(&blocks.status.path)
+                    .map_err(|e| HsmError::Invalid(e.to_string()))?,
+                self.fs.fs_context(),
+                blocks,
+            )
+            .map_err(|e| HsmError::Unknown(e.to_string()))?;
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(root.join("data"))?;
+            let mut hash = blake3::Hasher::new();
+            let mut length = 0;
+            while reader.has_remaining() {
+                let chunk = reader
+                    .async_read(None)
+                    .await
+                    .map_err(|e| HsmError::Unknown(e.to_string()))?;
+                let bytes = chunk.as_slice();
+                if bytes.is_empty() {
+                    return Err(HsmError::Integrity("short native view".into()));
+                }
+                hash.update(bytes);
+                file.write_all(bytes)?;
+                length += bytes.len() as u64;
+            }
+            reader
+                .complete()
+                .await
+                .map_err(|e| HsmError::Unknown(e.to_string()))?;
+            file.sync_all()?;
+            return Ok(TransferEvidence {
+                length,
+                digest: ContentDigest {
+                    algorithm: "blake3".into(),
+                    value: hash.finalize().as_bytes().to_vec(),
+                },
+            });
+        }
         let endpoint: Endpoint = serde_json::from_slice(&source.capability)
             .map_err(|e| HsmError::Invalid(e.to_string()))?;
         let mut file = std::fs::OpenOptions::new()
@@ -151,7 +230,10 @@ impl DataMover for CurvineDataMover {
             ("local-managed-v1", "local-managed-v1") => {
                 LocalDataMover.copy(ctx, source, destination).await
             }
-            ("curvine-view-v1", "local-managed-v1") => {
+            (
+                "curvine-view-v1" | "curvine-block-view-v1" | "curvine-block-view-v2",
+                "local-managed-v1",
+            ) => {
                 let root = tempfile::tempdir()?;
                 let expected = self.download(source, root.path()).await?;
                 let local = LocalDataMover::payload_endpoint(root.path())?;
@@ -210,6 +292,49 @@ impl CurvineStorage<NativeControl> {
             ));
         }
         serde_json::from_value(value["data"].clone()).map_err(|e| HsmError::Unknown(e.to_string()))
+    }
+    /// Pin and hash only policy-selected closed ordinary generations. A retry reuses the source token.
+    pub async fn seal_ordinary(&self, data: &DataKey) -> HsmResult<()> {
+        let token = format!("seal-{}-{}", data.entity.entity, data.generation);
+        let blocks: curvine_model::FileBlocks = self
+            .native_call(
+                json!({"op":"seal_begin","entity":data.entity,"data":data,"token":token}),
+                "blocks",
+            )
+            .await?;
+        let mut reader = FsReader::new(
+            CvPath::from_str(&blocks.status.path).map_err(|e| HsmError::Invalid(e.to_string()))?,
+            self.transport.filesystem().fs_context(),
+            blocks,
+        )
+        .map_err(|e| HsmError::Unknown(e.to_string()))?;
+        let mut hash = blake3::Hasher::new();
+        let mut length = 0u64;
+        while reader.has_remaining() {
+            let chunk = reader
+                .async_read(None)
+                .await
+                .map_err(|e| HsmError::Unknown(e.to_string()))?;
+            let bytes = chunk.as_slice();
+            if bytes.is_empty() {
+                return Err(HsmError::Integrity("short source while sealing".into()));
+            }
+            hash.update(bytes);
+            length += bytes.len() as u64;
+        }
+        reader
+            .complete()
+            .await
+            .map_err(|e| HsmError::Unknown(e.to_string()))?;
+        let evidence = TransferEvidence {
+            length,
+            digest: ContentDigest {
+                algorithm: "blake3".into(),
+                value: hash.finalize().as_bytes().to_vec(),
+            },
+        };
+        let _: EntityState = self.native_call(json!({"op":"seal_commit","entity":data.entity,"data":data,"token":token,"evidence":evidence}), "entity").await?;
+        Ok(())
     }
     /// Create-only import into a fresh protected inode. Parent must already exist.
     pub async fn import_file(
@@ -274,7 +399,12 @@ impl CurvineStorage<NativeControl> {
         let view: DataView = self
             .native_call(json!({"op":"open_view","context":ctx,"data":data}), "view")
             .await?;
-        if view.data != *data || view.source.adapter != "curvine-view-v1" {
+        if view.data != *data
+            || !matches!(
+                view.source.adapter.as_str(),
+                "curvine-view-v1" | "curvine-block-view-v1" | "curvine-block-view-v2"
+            )
+        {
             return Err(HsmError::Integrity("invalid exact native read view".into()));
         }
         let result = CurvineDataMover::new(self.transport.filesystem().clone())

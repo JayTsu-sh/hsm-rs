@@ -5,3 +5,7 @@ spikes/*/Cargo.lock
 .idea/
 .vscode/
 *.swp
+
+# Local Python tooling caches
+__pycache__/
+*.py[cod]

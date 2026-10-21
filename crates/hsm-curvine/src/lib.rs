@@ -194,7 +194,10 @@ impl<T: ControlTransport> ManagedStorage for CurvineStorage<T> {
             ControlReply::View(view)
                 if view.data == *data
                     && !view.view_id.is_empty()
-                    && view.source.adapter == "curvine-view-v1"
+                    && matches!(
+                        view.source.adapter.as_str(),
+                        "curvine-view-v1" | "curvine-block-view-v1" | "curvine-block-view-v2"
+                    )
                     && !view.source.capability.is_empty()
                     && !view.digest.algorithm.is_empty()
                     && !view.digest.value.is_empty() =>
@@ -374,6 +377,9 @@ fn validate_state(state: &EntityState) -> HsmResult<()> {
         || state.revision == 0
         || state.digest.algorithm.is_empty()
         || state.digest.value.is_empty()
+            && !(state.digest.algorithm == "unsealed"
+                && state.residency == Residency::Online
+                && state.anchors.is_empty())
         || !valid_anchors
         || !valid_residency
     {

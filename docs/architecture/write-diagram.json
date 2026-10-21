@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "普通写入自动纳管 · 按 1—6 执行",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-hsm-three-flows-20261020-170434/write-diagram.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "ssh://git@localhost/work/jay/hsm/.archify/architecture-curvine-hsm-deployed-20261020-164157/evidence",
+      "revision": "c9cc378ac025657b19948e0ea73fb982be89bf42",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "frontend",
+      "label": "应用 · Curvine FUSE / SDK",
+      "sublabel": "统一路径 /data/a · 按偏移定位 block",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        280,
+        150
+      ],
+      "sources": [
+        {
+          "path": "curvine/crates/client/curvine-client-core/src/file/fs_writer_base.rs",
+          "line": 367,
+          "end_line": 444
+        },
+        {
+          "path": "deployment/blocks-before.json",
+          "line": 1,
+          "end_line": 56
+        }
+      ],
+      "tag": "一个逻辑文件可以对应多个块"
+    },
+    {
+      "id": "masters",
+      "type": "backend",
+      "label": "Master · 统一命名空间与块映射",
+      "sublabel": "目录 / inode / 长度 / blocks / 副本位置",
+      "pos": [
+        620,
+        40
+      ],
+      "size": [
+        320,
+        150
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-master/src/master/meta/inode/inode_file.rs",
+          "line": 30,
+          "end_line": 49
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm/ordinary.rs",
+          "line": 51,
+          "end_line": 151
+        },
+        {
+          "path": "curvine/crates/common/curvine-proto/proto/master.proto",
+          "line": 198,
+          "end_line": 213
+        }
+      ],
+      "tag": "3 节点 Raft · 原生文件元数据"
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Worker · 接收与管理 block",
+      "sublabel": ".80 / .81 / .82 · 按 block ID 读写",
+      "pos": [
+        40,
+        600
+      ],
+      "size": [
+        280,
+        140
+      ],
+      "sources": [
+        {
+          "path": "curvine/crates/adapters/curvine-storage-local/src/layout/file_layout.rs",
+          "line": 133,
+          "end_line": 163
+        },
+        {
+          "path": "curvine/crates/client/curvine-client-core/src/file/fs_writer_base.rs",
+          "line": 367,
+          "end_line": 444
+        },
+        {
+          "path": "deployment/blocks-before.json",
+          "line": 1,
+          "end_line": 56
+        }
+      ],
+      "tag": "每个 Worker 保存部分块及副本"
+    },
+    {
+      "id": "online",
+      "type": "database",
+      "label": "Worker 本地盘 · 块文件",
+      "sublabel": "active/b*/b*/blk_<block_id>",
+      "pos": [
+        620,
+        600
+      ],
+      "size": [
+        320,
+        140
+      ],
+      "sources": [
+        {
+          "path": "curvine/crates/adapters/curvine-storage-local/src/layout/file_layout.rs",
+          "line": 61,
+          "end_line": 89
+        },
+        {
+          "path": "curvine/crates/adapters/curvine-storage-local/src/block_meta.rs",
+          "line": 24,
+          "end_line": 45
+        },
+        {
+          "path": "deployment/blocks-before.json",
+          "line": 1,
+          "end_line": 56
+        }
+      ],
+      "tag": "同一块 ID 在不同 Worker 保存副本"
+    },
+    {
+      "id": "hsm_metadata",
+      "type": "database",
+      "label": "common CF · HSM 主记录",
+      "sublabel": "\\x03hsm:record:<inode> → JSON Record",
+      "tag": "每 inode 一条当前内容记录",
+      "pos": [
+        620,
+        310
+      ],
+      "size": [
+        320,
+        150
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-master/src/master/hsm/ordinary.rs",
+          "line": 19,
+          "end_line": 44
+        },
+        {
+          "path": "curvine/crates/common/curvine-model/src/hsm/native.rs",
+          "line": 102,
+          "end_line": 137
+        },
+        {
+          "path": "curvine/curvine-master/src/master/meta/store/rocks_inode_store.rs",
+          "line": 35,
+          "end_line": 54
+        }
+      ]
+    },
+    {
+      "id": "hsm_candidate",
+      "type": "database",
+      "label": "common CF · 候选索引",
+      "sublabel": "candidate:<state>:<atime20>:<inode>",
+      "tag": "value 为 JSON inode 字符串",
+      "pos": [
+        1160,
+        310
+      ],
+      "size": [
+        320,
+        150
+      ],
+      "sources": [
+        {
+          "path": "curvine/curvine-master/src/master/hsm/ordinary.rs",
+          "line": 6,
+          "end_line": 44
+        },
+        {
+          "path": "curvine/curvine-master/src/master/hsm/lifecycle.rs",
+          "line": 281,
+          "end_line": 366
+        },
+        {
+          "path": "curvine/curvine-master/src/master/meta/store/rocks_inode_store.rs",
+          "line": 164,
+          "end_line": 183
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "step-1",
+      "from": "client",
+      "to": "masters",
+      "label": "1 · 创建文件 / 申请 block",
+      "variant": "default"
+    },
+    {
+      "id": "step-2",
+      "from": "masters",
+      "to": "client",
+      "label": "2 · 返回 inode、块 ID 与位置",
+      "variant": "default"
+    },
+    {
+      "id": "step-3",
+      "from": "client",
+      "to": "workers",
+      "label": "3 · 按块写入 Worker",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-4",
+      "from": "workers",
+      "to": "online",
+      "label": "4 · 块文件与副本持久化",
+      "variant": "emphasis"
+    },
+    {
+      "id": "step-5",
+      "from": "client",
+      "to": "masters",
+      "label": "5 · close / complete 完成写入",
+      "variant": "default"
+    },
+    {
+      "id": "step-6",
+      "from": "masters",
+      "to": "client",
+      "label": "6 · 返回写入完成确认",
+      "variant": "default"
+    },
+    {
+      "id": "close-hsm-metadata",
+      "from": "masters",
+      "to": "hsm_metadata",
+      "label": "5a · 同批写入完整 Record"
+    },
+    {
+      "id": "close-hsm-candidate",
+      "from": "masters",
+      "to": "hsm_candidate",
+      "label": "5b · 同批删除旧索引、写入新索引"
+    }
+  ],
+  "cards": [],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Master 既有 RocksDB · common CF · journal / Raft 权威域",
+      "wraps": [
+        "masters",
+        "hsm_metadata",
+        "hsm_candidate"
+      ],
+      "pad": 18
+    }
+  ]
+}

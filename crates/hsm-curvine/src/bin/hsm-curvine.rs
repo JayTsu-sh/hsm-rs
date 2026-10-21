@@ -385,6 +385,7 @@ async fn cycle(
     owner: &str,
     max_actions: usize,
 ) -> HsmResult<CycleReport> {
+    let _ = storage.gc_batch().await;
     let definitions = definitions(storage, epoch).await?;
     let mut report = CycleReport {
         admitted: 0,
@@ -392,32 +393,97 @@ async fn cycle(
         failed: 0,
         retry: 0,
     };
+    execute_ready(
+        storage,
+        engine,
+        &definitions,
+        backend_id,
+        epoch,
+        owner,
+        max_actions,
+        &mut report,
+    )
+    .await?;
+    for data in storage.pending_seals().await? {
+        storage.seal_ordinary(&data).await?;
+        execute_ready(
+            storage,
+            engine,
+            &definitions,
+            backend_id,
+            epoch,
+            owner,
+            max_actions,
+            &mut report,
+        )
+        .await?;
+    }
     for policy in definitions
         .values()
         .filter(|p| p.enabled && p.backend == backend_id)
     {
-        let mut after = None;
+        let mut examined = 0usize;
         loop {
             let batch = storage
-                .scan_policy(&context(epoch, None), &policy.id, after.as_deref(), 16)
+                .scan_scheduled(
+                    &context(epoch, None),
+                    &policy.id,
+                    256.min(policy.selection.scan_budget - examined),
+                )
                 .await?;
             report.admitted += batch.admitted.len();
-            after = batch.next;
-            if after.is_none() {
+            examined += batch.examined;
+            for data in &batch.to_seal {
+                storage.seal_ordinary(data).await?;
+            }
+            if batch.next.is_none() || examined >= policy.selection.scan_budget {
                 break;
             }
         }
     }
+    execute_ready(
+        storage,
+        engine,
+        &definitions,
+        backend_id,
+        epoch,
+        owner,
+        max_actions,
+        &mut report,
+    )
+    .await?;
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_ready(
+    storage: &Storage,
+    engine: &Engine,
+    definitions: &std::collections::BTreeMap<String, LifecyclePolicy>,
+    backend_id: &str,
+    epoch: u64,
+    owner: &str,
+    max_actions: usize,
+    report: &mut CycleReport,
+) -> HsmResult<()> {
+    if report.executed >= max_actions {
+        return Ok(());
+    }
     let mut after = None;
     'jobs: loop {
         let page = storage
-            .intents(&context(epoch, None), after.as_deref(), 16)
+            .ready_intents(&context(epoch, None), after.as_deref(), 16)
             .await?;
         for intent in page.items {
-            if definitions
-                .get(&intent.policy)
-                .is_none_or(|p| p.backend != backend_id)
-            {
+            let belongs = match &intent.action {
+                hsm_core::ManagedAction::Recall(key) | hsm_core::ManagedAction::Archive(key) => {
+                    key.backend == backend_id
+                }
+                hsm_core::ManagedAction::Release => definitions
+                    .get(&intent.policy)
+                    .is_some_and(|p| p.backend == backend_id),
+            };
+            if !belongs {
                 continue;
             }
             let eligible = intent.status == IntentStatus::Ready
@@ -448,7 +514,7 @@ async fn cycle(
             break;
         }
     }
-    Ok(report)
+    Ok(())
 }
 
 async fn read_file(
