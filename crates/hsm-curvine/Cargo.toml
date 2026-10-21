@@ -16,22 +16,22 @@ native-integration = ["native", "dep:curvine-server"]
 tokio = { workspace = true, features = ["time", "signal", "rt", "macros"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 hsm-engine = { path = "../hsm-engine", optional = true }
-curvine-model = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
+curvine-model = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
 hsm-core = { path = "../hsm-core" }
 serde.workspace = true
 serde_json = "1"
 hsm-local = { path = "../hsm-local", optional = true }
 tempfile = { version = "3", optional = true }
 blake3 = { version = "1", optional = true }
-curvine-client-core = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
-curvine-fs-api = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
-curvine-proto = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
-curvine-error = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
+curvine-client-core = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
+curvine-fs-api = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
+curvine-proto = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
+curvine-error = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
 # Opt-in real-cluster test harness, not needed by the production native Adapter.
-curvine-server = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", features = ["hsm-scale-test"], optional = true }
-curvine-config = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
+curvine-server = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", features = ["hsm-scale-test"], optional = true }
+curvine-config = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
 
-curvine-runtime = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec", optional = true }
+curvine-runtime = { git = "https://github.com/JayTsu-sh/curvine.git", rev = "122d9535f941b6b738422935dedbee89aa13928c", optional = true }
 
 [dev-dependencies]
 hsm-engine = { path = "../hsm-engine" }

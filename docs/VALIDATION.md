@@ -4,7 +4,7 @@
 
 ## 构建来源
 
-首次发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。当前 hsm-curvine 的 Cargo.toml 固定过渡微批代码 `ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec`；下文 P1 验收所用的历史 Curvine 提交是 `826a2ae9be052b2bf86d1a1647551e396adfcc5f`。Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
+首次发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。当时 hsm-curvine 的 Cargo.toml 固定过渡微批代码 `ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec`；下文 P1 验收所用的历史 Curvine 提交是 `826a2ae9be052b2bf86d1a1647551e396adfcc5f`。Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
 
 从本仓库克隆后，可直接执行：
 
@@ -57,7 +57,7 @@ Curvine 使用已发布 hsm-core Git 依赖运行 `cargo test -p curvine-master 
 
 另外使用完全相同的 release 基准，分别测试原版 Curvine `feb3c9e2`、当前服务器/SDK 关闭 HSM、开启 HSM 自动纳管。每组独立新建三个 Master/一 Worker 的同进程 MiniCluster，SDK 通过真实 TCP/Raft 操作，禁用短路、无 UFS；三轮交替执行。普通读写保持 Online，不运行 Archive/Recall 搬运。
 
-16 并发创建并关闭空文件的吞吐中位数从原版 5690.5 降到开启 HSM 后的 96.9 ops/s，P99 从 3.242 增到 195.820 ms；空文件 open+complete 为 13292.9 → 94.0 ops/s。get_status 基本持平。当前主要结构性成本是全局提交串行边界和额外 barrier/受保护读取提交；本次没有修改这些生产路径。HSM 关闭组也有 SDK open 探测开销，不能等同于原版。
+16 并发创建并关闭空文件的吞吐中位数从原版 5690.5 降到开启 HSM 后的 96.9 ops/s，P99 从 3.242 增到 195.820 ms；空文件 open+complete 为 13292.9 → 94.0 ops/s。get_status 基本持平。该历史基线的主要结构性成本是全局提交串行边界和额外 barrier/受保护读取提交；本次没有修改这些生产路径。HSM 关闭组也有 SDK open 探测开销，不能等同于原版。
 
 完整元数据、小文件、加长大文件测试和扫描并发结果、原始 JSON、源码/二进制指纹及复现方法见 [原版与 HSM 性能对比](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/performance-comparison.md)。这些同主机 SDK 工程基线与百万 namespace 验证属于不同范围，不是 PVE 上原版/HSM 的 A/B 或生产吞吐 SLO。
 
@@ -81,9 +81,17 @@ Curvine 在最终 `ad7fdaa2` 上 journal 单元 **27 通过**，Master HSM 相�
 
 升级历史 journal 到 ordinary_format=2 后，上一轮 A、B 的公开 EntityState、原 inode、DataKey 和归档锚点逐字段保持一致，三 Worker 全部恢复。该检查独立于全新目录的闭环测试。
 
+## 2026-10-22 累计性能改造与 HA 回归
+
+当前 Curvine 固定版本以 [Cargo.toml](../crates/hsm-curvine/Cargo.toml) 和 Cargo.lock 为准。Native 创建/覆盖、块分配、关闭/flush、可写 open 和非递归 SetAttr/Delete 使用稳定请求身份、条件提交及原始结果。普通元数据查询合批取 ReadIndex；仅操作私有准备数据的路径共享投影资格，旧式修改/控制独占。相邻已准备好的 Native/HSM entry 可以合用 proposal，每个 ticket 保留自身回执。Curvine 模块 247 项和两个优化集群用例已通过。八个 Curvine 依赖及 Cargo.lock 固定 `122d9535f941b6b738422935dedbee89aa13928c`，取消本地 path patch 后执行 `CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace --features hsm-curvine/native-integration -j 6`，30 项功能测试（含五个 managed 集群场景和一个 native 场景）及全部文档测试通过，两个规模/子进程入口保持 ignored。没有沿用只测试本地 path 的结果作为固定 Git 版本的验收。
+
+进程重启用例增加普通文件已提交删除、尚待物理清理的场景。保留磁盘目录并排除旧 Leader 后，要求首次 Exists 自身正确、HSM Record 不存在、退休义务仍能处理并最终得到 Worker 删除确认。此测试曾复现普通 Exists 读取旧前缀；ReadIndex 后即正确，说明删除日志未丢失，修正的是元数据查询资格。该用例使用 Master/Worker 进程组重启，不能等同于独立物理节点/磁盘故障验收。
+
+本轮没有升级 PVE，没有运行百万验收或生成优化后的原版性能差值；历史数值保持各自冻结版本的适用范围。rename、递归及后台修改迁移、队列调度与组合故障验收仍待完成。
+
 ## 边界与历史记录
 
-当前支持单硬链接、非 UFS 常规文件。策略是 GPFS 对应概念的类型化子集，不解析 GPFS 语法或任意权重表达式。索引分页减少目录扫描；大小、owner 等条件已在当前路径解析前检查，但仍需 Record 回查，路径仍后过滤。已完成百万 Record 基准及内部批量预置的百万 namespace 验证，尚未验收百万普通客户端写入吞吐；元数据提交使用全局串行边界。
+当前支持单硬链接、非 UFS 常规文件。策略是 GPFS 对应概念的类型化子集，不解析 GPFS 语法或任意权重表达式。索引分页减少目录扫描；大小、owner 等条件已在当前路径解析前检查，但仍需 Record 回查，路径仍后过滤。已完成百万 Record 基准及内部批量预置的百万 namespace 验证，尚未验收百万普通客户端写入吞吐；当前 owned 路径使用共享准备与条件发布，旧式修改仍有独占边界；当前代码的完整百万验收尚未执行。
 
 Recall 为整文件恢复，私有恢复布局单副本，尚不参与普通块副本修复；全量覆盖可用，恢复布局上的追加与完整可变 POSIX 语义尚未覆盖。有活跃读取或归档保护时修改可能被拒绝。LocalArchive 单节点，控制者 Running 接管仍需显式 epoch。所有虚拟机在同一 PVE 物理机，没有生产 HA 承诺。搬运需要完整临时 spool。
 

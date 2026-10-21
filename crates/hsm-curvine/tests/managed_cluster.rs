@@ -252,9 +252,38 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         assert_eq!(storage.inspect(&initial.data.entity).await?,dual);
         let pin=storage.prepare_archive(&context("held-pin"),&initial.data).await?;
         assert!(matches!(engine.release(&context("busy-release"),&dual).await,Err(HsmError::Busy(_))));
+        // Commit an ordinary unlink before restarting every process. Its
+        // physical GC must survive without either inode or HSM Record.
+        use curvine_fs_api::Writer;
+        let retired_path = curvine_fs_api::Path::from_str("/retired-across-restart")?;
+        let mut retired_writer = fs.create(&retired_path, false).await?;
+        retired_writer.write(b"retired across restart").await?;
+        retired_writer.complete().await?;
+        let retired_status = fs.get_status(&retired_path).await?;
+        let retired_entity = hsm_core::EntityKey {
+            entity: retired_status.id.to_string(), ..initial.data.entity.clone()
+        };
+        assert!(storage.inspect(&retired_entity).await.is_ok());
+        assert_eq!(fs.delete(&retired_path, false).await?.inodes, 1);
         let old_leader=fs.get_filesystem_info().await?.active_master;
         processes.restart(&old_leader)?;
         eprintln!("phase: restarted on another leader");
+        assert!(!fs.exists(&retired_path).await?, "metadata query served the pre-delete prefix after leader restart");
+        assert!(matches!(storage.inspect(&retired_entity).await, Err(HsmError::NotFound(_))));
+        let gc = NativeControl::new(fs.clone());
+        let collect = || gc.exchange(br#"{"op":"gc_batch"}"#.to_vec());
+        let first: serde_json::Value = serde_json::from_slice(&collect().await?)?;
+        assert_eq!(first["kind"], "gc");
+        assert!(first["data"].as_u64().unwrap_or(0) > 0,
+            "retirement obligation was lost when the inode deletion replayed");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let response: serde_json::Value = serde_json::from_slice(&collect().await?)?;
+            assert_eq!(response["kind"], "gc");
+            if response["data"] == 0 { break; }
+            assert!(Instant::now() < deadline, "retired blocks were not acknowledged after restart");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         assert_eq!(storage.inspect(&initial.data.entity).await?,dual);
         assert_eq!(engine.archive(&context("archive"),&initial.data,&key).await?,dual);
         assert_eq!(storage.pending_view(&context("held-pin"),&initial.data.entity).await?,pin);

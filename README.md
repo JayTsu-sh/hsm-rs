@@ -27,4 +27,4 @@ cargo run -p hsm-local --bin hsm-local -- /tmp/hsm-local-example
 
 本地参考是单主机、独占 root、经 Interface 访问的逻辑 namespace；支持持久成功结果及重开恢复，不提供跨节点 authority、透明 POSIX 召回或容量预留。Curvine 支持非 UFS 单硬链接常规文件自动纳管及本地归档；默认不开启，需按文档配置并使用匹配的 Master/Worker/FUSE 版本。Recall 私有布局仍是单副本，完整可变文件语义与生产 HA 尚未完成。构建及集群验证命令见 [Curvine Adapter](crates/hsm-curvine/README.md)。完整的生产协调和故障验收仍按设计推进。
 
-原版 Curvine 与引入 HSM 后的前台吞吐、尾延迟及扫描影响见 [性能对比报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/performance-comparison.md)。当前全局提交协调仍有明显的每文件操作开销。
+历史版本的前台吞吐、尾延迟及扫描影响见[性能对比报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/performance-comparison.md)。当前已增加 Native owned 提交、读取保护合批、访问 overlay、快照筛查、Worker I/O 解耦及元数据查询 ReadIndex；owned 路径共享准备，相邻 Native/HSM 条目可共用 proposal，旧式修改/控制仍保留独占边界。完整优化尚未结束，本轮百万验收和最终原版对比尚未执行，当前进度见[优化方案](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/optimization-plan.md)。
