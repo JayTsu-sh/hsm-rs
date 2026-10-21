@@ -8,17 +8,20 @@ use serde::{Deserialize, Serialize};
 pub enum PolicyAction {
     /// Archive an online generation.
     Archive,
-    /// Release a dual-resident generation with a verified anchor.
+    /// Migrate an online generation through Archive, then Release its verified dual copy.
     Release,
     /// Explicitly select offline generations for restoration.
     Recall,
 }
 
 /// Evaluated by source storage against its authoritative records.
-/// Each revision runs at most once per content generation, preventing rule cycles.
+/// Sources deduplicate each selected observation and can re-admit a later cold residency interval.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecyclePolicy {
+    /// Scheduling, coldness, exclusion and pressure controls.
+    #[serde(default)]
+    pub selection: PolicySelection,
     /// Operator-selected stable policy name.
     pub id: String,
     /// Source-assigned revision; create at one, update with compare-and-swap.
@@ -39,10 +42,74 @@ pub struct LifecyclePolicy {
     pub backend: String,
 }
 
+/// Storage-side policy controls; percentages use basis points (100 = 1%).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicySelection {
+    /// Minimum interval between complete passes.
+    pub scan_interval_ms: u64,
+    /// Maximum source records examined by a policy per worker cycle.
+    pub scan_budget: usize,
+    /// Maximum newly admitted actions per pass.
+    pub max_candidates: usize,
+    /// Positive weight for CURRENT_TIMESTAMP - ACCESS_TIME; oldest first.
+    pub access_age_weight: u32,
+    /// Minimum time since the last data access.
+    pub min_access_age_ms: u64,
+    /// Minimum time since the last content modification.
+    pub min_modify_age_ms: u64,
+    /// Excluded path prefixes, evaluated before admission.
+    pub exclude_prefixes: Vec<String>,
+    /// Optional owning user condition.
+    pub owner: Option<String>,
+    /// Optional owning group condition.
+    pub group: Option<String>,
+    /// Optional pressure start/stop thresholds for the online worker pool.
+    pub capacity: Option<CapacityWatermarks>,
+}
+impl Default for PolicySelection {
+    fn default() -> Self {
+        Self {
+            scan_interval_ms: 60_000,
+            scan_budget: 1024,
+            max_candidates: 128,
+            access_age_weight: 1,
+            min_access_age_ms: 0,
+            min_modify_age_ms: 0,
+            exclude_prefixes: vec![],
+            owner: None,
+            group: None,
+            capacity: None,
+        }
+    }
+}
+/// Hysteresis: start at high; stop only after actual usage reaches low.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityWatermarks {
+    /// Start threshold: 8000 means 80%.
+    pub high_basis_points: u16,
+    /// Stop threshold: 6000 means 60%.
+    pub low_basis_points: u16,
+}
+
 impl LifecyclePolicy {
     /// Validate portable limits before admission.
     pub fn validate(&self) -> HsmResult<()> {
-        if self.id.is_empty()
+        if self.selection.scan_interval_ms == 0
+            || self.selection.scan_interval_ms > i64::MAX as u64
+            || self.selection.scan_budget == 0
+            || self.selection.scan_budget > 65536
+            || self.selection.max_candidates == 0
+            || self.selection.max_candidates > 4096
+            || self.selection.access_age_weight == 0
+            || self.selection.min_access_age_ms > i64::MAX as u64
+            || self.selection.min_modify_age_ms > i64::MAX as u64
+            || self.selection.exclude_prefixes.len() > 64
+            || self.selection.capacity.as_ref().is_some_and(|w| {
+                w.low_basis_points >= w.high_basis_points || w.high_basis_points > 10000
+            })
+            || self.id.is_empty()
             || self.id.len() > 64
             || !self
                 .id
@@ -142,6 +209,9 @@ pub struct LifecyclePage<T> {
 /// Candidate scan result: admission is a committed storage transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanBatch {
+    /// Closed source generations requiring protected content hashing before admission.
+    #[serde(default)]
+    pub to_seal: Vec<crate::DataKey>,
     /// Number of authoritative records examined, including rejected candidates.
     pub examined: usize,
     /// Newly admitted intent IDs; repeat scans cannot duplicate them.
