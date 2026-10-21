@@ -98,3 +98,7 @@ C2 常驻 worker 优先领取召回并检查恢复锚点。C3 data-mover 将归�
 ## 当前边界
 
 单硬链接、非 UFS 常规文件在范围内。普通初始布局两副本；Recall 私有布局当前单副本，不参加普通块修复与完整容量统计。恢复布局上的读取和全量覆盖可用，追加与完整可变 POSIX 语义尚未覆盖；活动保护期间修改可能被拒绝。控制器和 LocalArchive 单节点，旧 Running 接管仍需显式提升 epoch。完整 spool 和控制通道影响性能，百万 namespace 扫描和 checkpoint 恢复已验证；百万普通客户端写入吞吐与完整盘损坏/断电矩阵尚未验收，不宣称 GPFS/EE 全功能或生产 HA。
+
+## HA 目标设计
+
+当前 PVE 同宿主机部署仍用于功能测试。生产 HA 需要独立故障域上的三个 Master、满足写入确认和修复要求的 Worker 副本、跨节点 hsm-rs 主备，以及归档数据/目录和 Recall 在线布局的耐故障方案。详细接管顺序、微批换主语义、旧执行器隔离及故障注入矩阵见 [HA 设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/ha-design.md)。这些是待实现目标，未部署或验收。

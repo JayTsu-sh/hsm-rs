@@ -98,3 +98,5 @@ DataMover 不修改驻留状态，也不执行删除 namespace 的动作。Relea
 普通初始数据遵循 Curvine replicas 配置；私有恢复布局仍是单副本，不参与普通块副本修复和完整容量统计。LocalArchive 也是单节点本地后端。所有客户端和 Master 必须使用匹配版本；没有宣称生产 HA、全套 GPFS ILM 兼容或磁带调度已经完成。
 
 发布版本通过 Cargo.toml 的 Git rev 与 Cargo.lock 固定 Curvine 和 data-mover 依赖，无需本地路径补丁。联合开发时可用 tools/curvine-workspace-config.py 生成本地 Cargo patch。部署图见 [DEPLOYMENT.md](DEPLOYMENT.md)，验证结果见 [VALIDATION.md](VALIDATION.md)。
+
+HA 目标与实现缺口另见 [Curvine HSM HA 设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/ha-design.md)：元数据换主、批次幂等、控制器主备资格、执行器尝试隔离、读取保护、归档冗余和 Recall 布局故障恢复分别验收。该目标设计不改变本文对当前单节点 LocalArchive、显式接管和单副本恢复布局的限制。
