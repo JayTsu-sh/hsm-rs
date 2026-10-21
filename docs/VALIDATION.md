@@ -4,7 +4,7 @@
 
 ## 构建来源
 
-发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。hsm-curvine 的 Cargo.toml 固定 Curvine `16885bb4ae15bcbc69d9df770bde3ab13bd4b86f`；Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
+发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。hsm-curvine 的 Cargo.toml 固定 Curvine `826a2ae9be052b2bf86d1a1647551e396adfcc5f`；Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
 
 从本仓库克隆后，可直接执行：
 
@@ -60,6 +60,14 @@ Curvine 使用已发布 hsm-core Git 依赖运行 `cargo test -p curvine-master 
 16 并发创建并关闭空文件的吞吐中位数从原版 5690.5 降到开启 HSM 后的 96.9 ops/s，P99 从 3.242 增到 195.820 ms；空文件 open+complete 为 13292.9 → 94.0 ops/s。get_status 基本持平。当前主要结构性成本是全局提交串行边界和额外 barrier/受保护读取提交；本次没有修改这些生产路径。HSM 关闭组也有 SDK open 探测开销，不能等同于原版。
 
 完整元数据、小文件、加长大文件测试和扫描并发结果、原始 JSON、源码/二进制指纹及复现方法见 [原版与 HSM 性能对比](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/performance-comparison.md)。这些同主机 SDK 工程基线与百万 namespace 验证属于不同范围，不是 PVE 上原版/HSM 的 A/B 或生产吞吐 SLO。
+
+## 2026-10-21 普通日志提交回执改造验收
+
+hsm-curvine 的 Curvine Git 依赖更新到 `826a2ae9be052b2bf86d1a1647551e396adfcc5f`，全工作区 `--locked`、`native-integration`、单测试线程的发布来源回归 **30 通过、0 失败、2 ignored**。五项真实多进程受管集群测试均通过；两个 ignored 分别是子进程 fixture 和需显式运行的百万规模测试。Curvine Master journal 单元测试 **26 通过**，HSM/恢复单元测试 **8 通过、1 ignored**，真实 Raft term/多数派提交测试 **2 通过**。
+
+另显式运行百万 namespace 测试 **1 通过**。内部批量预置 1,000,000 个文件，零匹配策略扫描 1,000,002 项、3908 页；两份普通 SDK 写入的非空文件经策略 Release 和 LocalArchive 搬运，三次普通读取触发两次自动 Recall。排除旧 leader 后从 checkpoint 恢复，身份、驻留和内容逐项保持。结果原始 JSON 与改造前后 release 性能对照见 [Curvine 提交回执验收](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/commit-receipts.md)。百万建库采用内部批量 fixture，三个 Master 与一个 Worker 仍在同一测试进程内的独立目录；不能视为物理机 HA 或百万普通 RPC 写入吞吐验收。规模测试与 Git 依赖编译曾重叠，其耗时不用作性能收益对比。
+
+相同 HSM 开启语义下的三轮 release 配对测量：16 并发 create+complete 从 95.7 提高到 198.1 ops/s，rename 从 205.3 到 389.2 ops/s，delete 从 202.0 到 400.4 ops/s；普通修改区间空 HSM barrier 为 0。64 MiB 4 并发写入中位吞吐 1040.8 → 1166.3 MiB/s，但 P99 369.44 → 489.81 ms，读取中位吞吐 2497.7 → 2399.1 MiB/s；不能宣称大文件路径稳定改善。测试方法、全部轮次和二进制指纹见 [改造前后性能结果](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/commit-receipt-results.md)。
 
 ## 真实 PVE 集群
 
