@@ -8,4 +8,4 @@
 
 写入说明源文件为 `write-reading.archify.md`；其中的原生部署图为 `write-diagram.html` / `write-diagram.json`。其余两张图各有同名 JSON。HTML 自包含，可以离线打开。
 
-这些页面保留 2026-10-20 验收时的冻结证据标识；其中源码导航指向开发环境内的本地 evidence 快照，不是 GitHub 可访问提交。已发布实现以本仓库的固定 Curvine Git 依赖及 [部署设计](../DEPLOYMENT.md)、[验证记录](../VALIDATION.md)为准。
+这些 HTML 是 2026-10-20 的冻结版本，尚未重绘 2026-10-21 的差量索引、有界清理和规模测试结果；最新 RocksDB 设计及原始结果见 [Curvine 规模测试报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/scale-validation.md)。这些页面保留当时的冻结证据标识；其中源码导航指向开发环境内的本地 evidence 快照，不是 GitHub 可访问提交。已发布实现以本仓库的固定 Curvine Git 依赖及 [部署设计](../DEPLOYMENT.md)、[验证记录](../VALIDATION.md)为准。

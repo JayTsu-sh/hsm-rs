@@ -54,7 +54,7 @@ HSM 卷上的普通元数据修改与 HSM 控制共享提交串行边界。普�
 
 一个提交批次检查策略版本、候选 record version、任务键和实体 active index，然后原子入队。任务 ID 绑定规则版本、DataKey、动作阶段、驻留区间、访问时间和状态版本。同一观察不重复；再次访问或修改后的新观察可以重新选择。Ready/Running 使用独立工作索引，召回优先，历史完成任务不必每轮遍历。
 
-RocksDB common CF 的精确键值、Record JSON、WriteBatch 与索引扫描/重放实现见配套 [Curvine RocksDB 设计](https://github.com/JayTsu-sh/curvine/blob/039631f4ea8aa5a06250aa8928e2328edc003475/docs/hsm/rocksdb-records.md)。
+RocksDB common CF 的精确键值、Record JSON、WriteBatch 与索引扫描/重放实现见配套 [Curvine RocksDB 设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/rocksdb-records.md)。
 
 ## 5 从 Online 到 Offline
 

@@ -46,6 +46,13 @@ fn process_cluster_child() -> Result {
         conf.journal.leader_create_snapshot = Some(false);
         conf.journal.snapshot_entries = u64::MAX;
         conf.journal.snapshot_interval = "24h".into();
+        if std::env::var_os("HSM_SCALE_FILES").is_some() {
+            conf.journal.snapshot_entries = 20_000;
+            conf.journal.snapshot_interval = "30s".into();
+            conf.journal.snapshot_min_interval = curvine_runtime::common::DurationUnit::new(30_000);
+            conf.journal.retain_checkpoint_num = 2;
+            conf.client.rpc_retry_max_duration_ms = 120_000;
+        }
         conf.journal.raft_tick_interval_ms = 100;
         conf.journal.raft_election_tick = 100;
         conf.journal.raft_min_election_ticks = 100;
@@ -59,6 +66,10 @@ fn process_cluster_child() -> Result {
         conf.client.rpc_retry_max_duration_ms = 30000;
         conf.client.short_circuit = false;
         conf.client.replicas = 1;
+        if std::env::var_os("HSM_SCALE_FILES").is_some() {
+            conf.client.rpc_timeout_ms = 120_000;
+            conf.client.rpc_retry_max_duration_ms = 120_000;
+        }
         conf.log.log_dir = "stderr".into();
         conf.master.log.log_dir = "stderr".into();
         conf.worker.log.log_dir = "stderr".into();
@@ -70,6 +81,20 @@ fn process_cluster_child() -> Result {
         cluster
     };
     cluster.start_cluster();
+    if let Ok(count) = std::env::var("HSM_SCALE_FILES") {
+        if !root.join("scale-seeded").exists() {
+            let files = count.parse::<usize>()?;
+            let source = cluster.get_active_master_fs();
+            let result = cluster
+                .clone_client_rt()
+                .block_on(source.hsm_test_prefill("/__hsm_scale_fixture__/records", files))?;
+            fs::write(
+                root.join("scale-prefill.json"),
+                serde_json::to_vec_pretty(&result)?,
+            )?;
+            fs::write(root.join("scale-seeded"), count)?;
+        }
+    }
     fs::write(root.join("ready"), b"ready")?;
     loop {
         std::thread::park_timeout(Duration::from_secs(30));
@@ -78,12 +103,17 @@ fn process_cluster_child() -> Result {
 struct ProcessCluster {
     root: PathBuf,
     child: Option<Child>,
+    scale_files: Option<usize>,
 }
 impl ProcessCluster {
     fn start(root: &Path) -> Result<Self> {
+        Self::start_with_scale(root, None)
+    }
+    fn start_with_scale(root: &Path, scale_files: Option<usize>) -> Result<Self> {
         let mut cluster = Self {
             root: root.to_path_buf(),
             child: None,
+            scale_files,
         };
         cluster.spawn(None)?;
         Ok(cluster)
@@ -108,8 +138,14 @@ impl ProcessCluster {
         if let Some(port) = skip {
             command.env("HSM_SKIP_MASTER", port.to_string());
         }
+        if let Some(files) = self.scale_files {
+            command.env("HSM_SCALE_FILES", files.to_string());
+        } else {
+            command.env_remove("HSM_SCALE_FILES");
+        }
         self.child = Some(command.spawn()?);
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now()
+            + Duration::from_secs(if self.scale_files.is_some() { 7200 } else { 90 });
         while !self.root.join("ready").exists() {
             if let Some(status) = self.child.as_mut().unwrap().try_wait()? {
                 return Err(format!(
@@ -1109,4 +1145,202 @@ fn ordinary_rename_and_truncate_preserve_authority_after_leader_restart() -> Res
         assert!(storage.resolve(renamed.path()).await.is_err());
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })
+}
+
+/// Expensive, opt-in scale acceptance: real namespace + Raft + ordinary SDK I/O.
+/// Setup batches normal internal create/complete calls; it does not measure
+/// ordinary-RPC ingestion throughput. All three Masters run in one fixture
+/// process with independent stores, and the HSM controller is a separate process.
+#[test]
+#[ignore = "million-file namespace, policy scan, local mover and checkpoint recovery"]
+fn million_namespace_policy_recall_and_checkpoint_recovery() -> Result {
+    use curvine_fs_api::{Path as CvPath, Reader, Writer};
+    use hsm_core::{IntentStatus, LifecyclePolicy, PolicyAction, PolicySelection};
+    struct Worker(Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let count = std::env::var("HSM_SCALE_FILES")
+        .unwrap_or_else(|_| "1000000".into())
+        .parse::<usize>()?;
+    assert!((1..=1_000_000).contains(&count));
+    let temp = tempfile::tempdir()?;
+    let root =
+        std::env::var_os("HSM_SCALE_ROOT").map_or_else(|| temp.path().to_path_buf(), PathBuf::from);
+    fs::create_dir_all(&root)?;
+    assert!(
+        fs::read_dir(&root)?.next().is_none(),
+        "scale root must be empty"
+    );
+    let begin = Instant::now();
+    let mut cluster = ProcessCluster::start_with_scale(&root, Some(count))?;
+    let (masters, workers): (Vec<ClusterConf>, Vec<ClusterConf>) =
+        serde_json::from_slice(&fs::read(root.join("cluster.json"))?)?;
+    let config = root.join("client.json");
+    fs::write(&config, serde_json::to_vec(&masters[0])?)?;
+    let rt = Arc::new(masters[0].client_rpc_conf().create_runtime());
+    let source = CurvineFileSystem::with_rt(masters[0].clone(), rt.clone())?;
+    let mut report = serde_json::json!({"kind":"real-curvine-namespace-scale","namespace_files":count,"payload_files":2,
+        "masters":3,"workers":1,"server_processes":1,"controller_processes":1,"pve_cluster":false,
+        "prefill":serde_json::from_slice::<serde_json::Value>(&fs::read(root.join("scale-prefill.json"))?)?});
+    rt.block_on(async {
+        // Verify through the public SDK, rather than trusting a fixture counter.
+        let start=Instant::now();let mut files=0usize;
+        for part in 0..count.div_ceil(1000) {
+            let path=CvPath::from_str(format!("/__hsm_scale_fixture__/records/part-{part:06}"))?;
+            let children=source.list_status(&path).await?;
+            assert_eq!(children.len(),(count-part*1000).min(1000));
+            assert!(children.iter().all(|s|s.len==0&&s.is_complete));files+=children.len();
+        }
+        assert_eq!(files,count);report["sdk_count_ms"]=serde_json::json!(start.elapsed().as_millis());
+        let storage=CurvineStorage::connect(NativeControl::new(source.clone())).await?;
+        let epoch=storage.controller_epoch().await?;
+        let ctx=|id:&str|OperationContext{operation_id:id.into(),controller_epoch:epoch,attempt_epoch:1};
+        for id in [0,count/2,count-1] {
+            let path=format!("/__hsm_scale_fixture__/records/part-{:06}/item-{id:012}",id/1000);
+            let state=storage.resolve(&path).await?;assert_eq!(state.residency,Residency::Online);assert_eq!(state.length,0);
+        }
+        source.mkdir(&CvPath::from_str("/scale-live")?,true).await?;
+        let a:Vec<u8>=(0..1024*1024+17).map(|i|(i%251)as u8).collect();
+        let b:Vec<u8>=(0..2*1024*1024+31).map(|i|(i%239)as u8).collect();
+        for (name,bytes) in [("a",a.as_slice()),("b",b.as_slice())] {
+            let mut writer=source.create(&CvPath::from_str(format!("/scale-live/{name}"))?,false).await?;
+            writer.write(bytes).await?;writer.complete().await?;
+        }
+        let initial=[storage.resolve("/scale-live/a").await?,storage.resolve("/scale-live/b").await?];
+        let zero=LifecyclePolicy{id:"scale-zero".into(),revision:1,enabled:true,prefix:"/scale-live/".into(),min_size:u64::MAX,
+            max_size:None,min_residency_ms:0,action:PolicyAction::Release,backend:"local".into(),selection:PolicySelection::default()};
+        storage.put_policy(&ctx("scale-zero-put"),&zero,None).await?;
+        let start=Instant::now();let mut cursor=None;let mut examined=0;let mut pages=0;
+        loop {
+            let batch=storage.scan_policy(&ctx(&format!("scale-zero-page-{pages}")),&zero.id,cursor.as_deref(),256).await?;
+            assert!(batch.examined<=256);assert!(batch.admitted.is_empty()&&batch.to_seal.is_empty());
+            examined+=batch.examined;pages+=1;cursor=batch.next;if cursor.is_none(){break;}
+        }
+        assert_eq!(examined,count+2);report["zero_match_scan"]=serde_json::json!({"examined":examined,"pages":pages,"ms":start.elapsed().as_millis(),"admitted":0});
+        let mut disabled=zero;disabled.enabled=false;disabled.revision=2;
+        storage.put_policy(&ctx("scale-zero-disable"),&disabled,Some(1)).await?;
+        let mut policy=LifecyclePolicy{id:"scale-release".into(),revision:1,enabled:true,prefix:"/scale-live/".into(),min_size:1024*1024,
+            max_size:None,min_residency_ms:0,action:PolicyAction::Release,backend:"local".into(),selection:PolicySelection{
+                scan_interval_ms:100,scan_budget:65536,max_candidates:2,..Default::default()}};
+        storage.put_policy(&ctx("scale-release-put"),&policy,None).await?;
+        let log=OpenOptions::new().create(true).append(true).open(root.join("worker.log"))?;
+        let _worker=Worker(Command::new(env!("CARGO_BIN_EXE_hsm-curvine")).arg("--config").arg(&config)
+            .arg("--archive-root").arg(root.join("archive")).args(["worker","--poll-ms","100"])
+            .stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log)).spawn()?);
+        let start=Instant::now();
+        loop {
+            let a=storage.resolve("/scale-live/a").await?;let b=storage.resolve("/scale-live/b").await?;
+            if a.residency==Residency::Offline&&b.residency==Residency::Offline{break;}
+            if start.elapsed()>Duration::from_secs(1800){return Err("scale release timeout".into());}
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        report["release_ms"]=serde_json::json!(start.elapsed().as_millis());
+        policy.enabled=false;policy.revision=2;storage.put_policy(&ctx("scale-release-disable"),&policy,Some(1)).await?;
+        async fn read(source:&CurvineFileSystem,path:&str)->Result<Vec<u8>> {
+            let mut reader=source.open(&CvPath::from_str(path)?).await?;let mut result=vec![];
+            while reader.has_remaining(){result.extend_from_slice(reader.async_read(None).await?.as_slice());}
+            reader.complete().await?;Ok(result)
+        }
+        let start=Instant::now();let(one,two,three)=tokio::join!(read(&source,"/scale-live/a"),read(&source,"/scale-live/a"),read(&source,"/scale-live/b"));
+        assert_eq!(one?,a);assert_eq!(two?,a);assert_eq!(three?,b);
+        let recalled=[storage.resolve("/scale-live/a").await?,storage.resolve("/scale-live/b").await?];
+        for i in 0..2 {assert_eq!(recalled[i].data,initial[i].data);assert_eq!(recalled[i].residency,Residency::Dual);}
+        let mut after=None;let mut recalls=0;
+        loop {
+            let page=storage.intents(&ctx(&format!("scale-intents-{recalls}")),after.as_deref(),16).await?;
+            for intent in &page.items {if intent.policy=="__access_recall" {assert_eq!(intent.status,IntentStatus::Done);recalls+=1;}}
+            after=page.next;if after.is_none(){break;}
+        }
+        assert_eq!(recalls,2);report["automatic_recall"]=serde_json::json!({"application_reads":3,"recall_intents":recalls,"ms":start.elapsed().as_millis(),"bytes_and_data_keys_preserved":true,"explicit_recall_calls":0});
+        fs::write(root.join("scale-states.json"),serde_json::to_vec(&recalled)?)?;
+        Ok::<(),Box<dyn std::error::Error+Send+Sync>>(())
+    })?;
+    // Allow followers to publish a supported committed checkpoint, then kill
+    // the whole server fixture and restart without the former leader.
+    std::thread::sleep(Duration::from_secs(35));
+    let old = rt.block_on(source.get_filesystem_info())?.active_master;
+    let offset = fs::metadata(root.join("servers.log"))?.len() as usize;
+    let start = Instant::now();
+    cluster.restart(&old)?;
+    report["recovery_ms"] = serde_json::json!(start.elapsed().as_millis());
+    let restarted = CurvineFileSystem::with_rt(masters[0].clone(), rt.clone())?;
+    rt.block_on(async {
+        let storage = CurvineStorage::connect(NativeControl::new(restarted.clone())).await?;
+        let expected: Vec<hsm_core::EntityState> =
+            serde_json::from_slice(&fs::read(root.join("scale-states.json"))?)?;
+        assert_eq!(storage.resolve("/scale-live/a").await?, expected[0]);
+        assert_eq!(storage.resolve("/scale-live/b").await?, expected[1]);
+        // The restored private layout must be readable without a controller.
+        for (name, length, modulus) in [
+            ("a", 1024 * 1024 + 17, 251),
+            ("b", 2 * 1024 * 1024 + 31, 239),
+        ] {
+            let mut reader = restarted
+                .open(&CvPath::from_str(format!("/scale-live/{name}"))?)
+                .await?;
+            let mut actual = vec![];
+            while reader.has_remaining() {
+                actual.extend_from_slice(reader.async_read(None).await?.as_slice());
+            }
+            reader.complete().await?;
+            let expected: Vec<u8> = (0..length).map(|i| (i % modulus) as u8).collect();
+            assert_eq!(actual, expected);
+        }
+        let mut total = 0;
+        for part in 0..count.div_ceil(1000) {
+            let children = restarted
+                .list_status(&CvPath::from_str(format!(
+                    "/__hsm_scale_fixture__/records/part-{part:06}"
+                ))?)
+                .await?;
+            assert!(children.iter().all(|s| s.len == 0 && s.is_complete));
+            total += children.len();
+        }
+        assert_eq!(total, count);
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    })?;
+    let log = fs::read_to_string(root.join("servers.log"))?;
+    let recovery = &log[offset..];
+    assert!(
+        recovery.contains("apply_snapshot:"),
+        "checkpoint restore was not observed"
+    );
+    let mut resets = vec![];
+    for line in recovery
+        .lines()
+        .filter(|l| l.contains("reset HSM projection:"))
+    {
+        let number = |name: &str| -> Result<u64> {
+            Ok(line
+                .split(&format!("{name}="))
+                .nth(1)
+                .ok_or("reset field missing")?
+                .split([',', ' '])
+                .next()
+                .ok_or("reset value missing")?
+                .parse()?)
+        };
+        let keys = number("keys")?;
+        let batch = number("max_batch_keys")?;
+        let bytes = number("max_batch_bytes")?;
+        assert!(keys >= count as u64 * 2 && batch <= 1024 && bytes <= 256 * 1024);
+        resets.push(serde_json::json!({"keys":keys,"max_batch_keys":batch,"max_batch_bytes":bytes,"elapsed_ms":number("elapsed_ms")?}));
+    }
+    assert_eq!(resets.len(), 2);
+    report["restart_resets"] = serde_json::json!(resets);
+    report["checkpoint_restore_observed"] = serde_json::json!(true);
+    report["elapsed_ms"] = serde_json::json!(begin.elapsed().as_millis());
+    report["worker_nodes"] = serde_json::json!(workers.len());
+    if let Ok(path) = std::env::var("HSM_SCALE_REPORT") {
+        fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+    }
+    println!(
+        "HSM_NAMESPACE_SCALE_RESULT={}",
+        serde_json::to_string(&report)?
+    );
+    Ok(())
 }

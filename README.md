@@ -12,7 +12,7 @@
 | [hsm-curvine](crates/hsm-curvine/README.md) | Curvine 原生权威记录、稳定 view、条件 Release、原 inode Recall 与 data-mover 本地桥接 |
 | [详细设计](docs/DESIGN.md) | 合同、持久化、保证范围、限制和 Curvine 接入顺序 |
 
-策略和任务保存在 Curvine；容量高低水位、访问年龄和条件筛选已实现。普通 FUSE 写入、双副本 Release 及并发自动 Recall 已在真实 PVE 集群通过，见 [部署设计与流程图](docs/DEPLOYMENT.md)、[完整测试描述](docs/PVE-FUSE-HSM.md)、[实现设计](docs/DESIGN.md)和[验证记录](docs/VALIDATION.md)。原生诊断脚本见 [本地 HSM 与生命周期](docs/LOCAL-HSM.md)。
+策略和任务保存在 Curvine；容量高低水位、访问年龄和条件筛选已实现。普通 FUSE 写入、双副本 Release 及并发自动 Recall 已在真实 PVE 集群通过，见 [部署设计与流程图](docs/DEPLOYMENT.md)、[完整测试描述](docs/PVE-FUSE-HSM.md)、[实现设计](docs/DESIGN.md)和[验证记录](docs/VALIDATION.md)。原生诊断脚本见 [本地 HSM 与生命周期](docs/LOCAL-HSM.md)。2026-10-21 已完成百万 Record 基准、内部批量预置的真实百万 namespace 策略/Release/自动 Recall/checkpoint 恢复，以及 PVE 复验；范围和复现方法见 [规模测试报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/scale-validation.md)。
 
 ## 运行
 

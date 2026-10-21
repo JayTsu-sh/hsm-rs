@@ -1,6 +1,6 @@
 # Curvine HSM 当前部署设计
 
-更新：2026-10-20；状态：当前工作区已实现并在 PVE 完成普通 FUSE 全流程验证。本文描述实际部署；[实现设计](DESIGN.md)中多控制者、完整副本修复和磁带调度等内容仍属后续目标。
+更新：2026-10-21；状态：已实现并在 PVE 完成普通 FUSE 全流程及规模优化后的复验。本文描述实际部署；[实现设计](DESIGN.md)中多控制者、完整副本修复和磁带调度等内容仍属后续目标。
 
 ## 架构图与流程入口
 
@@ -23,7 +23,7 @@
 
 三个 Master 通过既有 journal/Raft 维护元数据权威。三个 Worker 的本地磁盘共同提供统一文件系统，普通文件初始配置两个副本；没有 UFS。HSM controller 在一个进程中包含 hsm-engine、CurvineStorage、CurvineDataMover、实际 data-mover-rs Local transfer 和 LocalArchive。逻辑模块分层不等于独立进程：当前尚未把 executor 部署为独立远端服务。
 
-配置 `/etc/curvine-hsm/cluster.toml`，程序 `/opt/curvine-hsm/bin`，FUSE `/mnt/curvine`。Master 数据 `/var/lib/curvine-hsm/{meta,journal}`，Worker 数据 `/srv/curvine/worker`。全部虚拟机在 PVE 10.131.9.20，同物理机不构成物理故障隔离。服务已启用并运行；旧 VM402 不参与本次升级。
+配置 `/etc/curvine-hsm/cluster.toml`，程序 `/opt/curvine-hsm/bin`，FUSE `/mnt/curvine`。Master 元数据 `/var/lib/curvine-hsm/meta`，journal 已于 2026-10-21 迁至各节点独立的 16 GiB 本地 SSD，挂载 `/var/lib/curvine-hsm/journal-ssd`；原 journal 与配置备份保留。systemd Master 服务通过 `RequiresMountsFor` 等待该挂载，journal 的同步提交保持开启。Worker 数据仍在独立 64 GiB 本地盘 `/srv/curvine/worker`。全部虚拟机在 PVE 10.131.9.20，同物理机不构成物理故障隔离。服务已启用并运行；旧 VM402 不参与本次升级。
 
 ## 五层责任与权威边界
 
@@ -51,7 +51,7 @@ Curvine 提供统一文件命名空间与文件访问。应用看到一个完整
 
 ### 为 HSM 新增的权威元数据
 
-精确 CF/键值编码、Record JSON、候选项排序、WriteBatch、CAS 入队与启动重放见 [RocksDB 记录与索引详细设计](https://github.com/JayTsu-sh/curvine/blob/039631f4ea8aa5a06250aa8928e2328edc003475/docs/hsm/rocksdb-records.md)。
+精确 CF/键值编码、Record JSON、候选项排序、WriteBatch、CAS 入队与启动重放见 [RocksDB 记录与索引详细设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/rocksdb-records.md)。
 
 | 类别 | 字段与用途 | 新文件完成写入时 |
 |---|---|---|
@@ -71,7 +71,7 @@ Curvine 提供统一文件命名空间与文件访问。应用看到一个完整
 
 P1 运维 policy-put 将规则写入 Curvine，revision CAS 防止覆盖未知版本；worker 按 scan_interval_ms 周期调用。P2 Master 按驻留状态、atime、inode 索引读取，Dual 优先于 Online，状态内按访问年龄排序；筛选容量水位、路径与排除、大小、owner/group、访问/修改/驻留年龄。不是递归 readdir。正权重表示访问年龄优先，尚不支持任意权重表达式和 GPFS 策略语法。
 
-每 RPC 最多处理 256 个候选项，额外预读 1 项判断下一页；scan_budget 控制每轮计入 examined 的项，max_candidates 控制入选项。游标和下次运行时间持久化。达到高水位启动、低水位停止；所有规则共享在途预计回收预算，减少超额选择。这不是 Recall 的硬容量预留。路径等条件仍后过滤，未宣称大规模性能已验证。
+每 RPC 最多处理 256 个候选项，额外预读 1 项判断下一页；scan_budget 控制每轮计入 examined 的项，max_candidates 控制入选项。游标和下次运行时间持久化。达到高水位启动、低水位停止；所有规则共享在途预计回收预算，减少超额选择。这不是 Recall 的硬容量预留。大小、owner 等 Record 条件先于当前路径解析，路径仍后过滤；百万 Record 与批量预置百万 namespace 的实测范围见 [规模验证](VALIDATION.md#2026-10-21-规模优化后复验)。
 
 P3 同一存储提交校验规则与 record version，写 Ready intent、工作索引和 active index；worker 领取后再查资格和原始结果。读取改变访问观察，旧 Release 被 Superseded，变冷后可以按新观察重新选择。
 
@@ -93,6 +93,8 @@ C2 常驻 worker 优先领取召回并检查恢复锚点。C3 data-mover 将归�
 
 真实 .80 FUSE 写入五文件，.83 普通读取验证：A=8,388,625 B，B=6,291,487 B，依访问年龄先后 Online → Dual → Offline；hot、小文件、排除文件保持 Online。三 Worker 上原块全部删除，两副本回收 29,360,224 B。随后四次并发读只生成两个自动 Recall Done，SHA256、长度、inode 与 DataKey 全部相同；无显式 Recall、无启用 Recall 策略。完整操作及证据见 [PVE 测试描述](PVE-FUSE-HSM.md)。
 
+2026-10-21 在新目录 `/hsm-scale-pve-20261021/` 复验同一普通 FUSE 流程，A/B 共释放两副本 29,360,224 B，三 Worker 实地确认所有旧块副本删除；四次普通读合并为两个自动 Recall，身份及内容保持。临时快速策略最终禁用，原正常策略保留。另有 2000 个普通 SDK 空文件写入成功；详细结果见 [规模测试报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/scale-validation.md)。
+
 ## 当前边界
 
-单硬链接、非 UFS 常规文件在范围内。普通初始布局两副本；Recall 私有布局当前单副本，不参加普通块修复与完整容量统计。恢复布局上的读取和全量覆盖可用，追加与完整可变 POSIX 语义尚未覆盖；活动保护期间修改可能被拒绝。控制器和 LocalArchive 单节点，旧 Running 接管仍需显式提升 epoch。完整 spool 和控制通道影响性能，尚未做大规模扫描或完整盘损坏/断电矩阵，不宣称 GPFS/EE 全功能或生产 HA。
+单硬链接、非 UFS 常规文件在范围内。普通初始布局两副本；Recall 私有布局当前单副本，不参加普通块修复与完整容量统计。恢复布局上的读取和全量覆盖可用，追加与完整可变 POSIX 语义尚未覆盖；活动保护期间修改可能被拒绝。控制器和 LocalArchive 单节点，旧 Running 接管仍需显式提升 epoch。完整 spool 和控制通道影响性能，百万 namespace 扫描和 checkpoint 恢复已验证；百万普通客户端写入吞吐与完整盘损坏/断电矩阵尚未验收，不宣称 GPFS/EE 全功能或生产 HA。

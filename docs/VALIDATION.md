@@ -1,10 +1,10 @@
-# 普通 FUSE 文件 HSM 验收 v0.6
+# 普通 FUSE 文件 HSM 验收与规模验证
 
 2026-10-20。本轮工作区新增普通文件自动纳管、容量与访问年龄策略、周期索引扫描，以及普通读取触发的透明 Recall。详细操作和 PVE 证据见 [PVE-FUSE-HSM.md](PVE-FUSE-HSM.md)，责任与一致性设计见 [DESIGN.md](DESIGN.md)。
 
 ## 构建来源
 
-发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。hsm-curvine 的 Cargo.toml 固定 Curvine `039631f4ea8aa5a06250aa8928e2328edc003475`；Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
+发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。hsm-curvine 的 Cargo.toml 固定 Curvine `16885bb4ae15bcbc69d9df770bde3ab13bd4b86f`；Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
 
 从本仓库克隆后，可直接执行：
 
@@ -41,6 +41,18 @@ Curvine 使用已发布 hsm-core Git 依赖运行 `cargo test -p curvine-master 
 
 日志位于开发环境 `research/hsm-publish-workspace-tests.log`、`research/hsm-publish-curvine-unit.log`，路径相对于 `/work/jay/hsm`。这是本次发布前的本机重新验证；PVE 验收仍为下面记录的 2026-10-20 部署，未因源码推送而重新部署。
 
+## 2026-10-21 规模优化后复验
+
+固定 Curvine `16885bb4`，完整工作区 native-integration 回归 **30 通过、0 失败、2 ignored**；ignored 分别为被父测试启动的子进程 fixture 和需显式运行的规模测试。Curvine HSM/有界清理回归 **8 通过、0 失败**，另一个 ignored 为独立运行的元数据基准。相关格式与差异检查通过；没有将历史严格 Clippy 结果记为本轮结果。
+
+真实 RocksDB 的百万 Record/两百万 KV 基准，优化前后各重复三次：排序键不变的更新由每次 5 个 KV 操作降至 1 个，真实 atime 更新由 5 个降至 3 个；清理最大批次从两百万键降至 1024 键，采样峰值 RSS 中位数从 349.6 MiB 降至 193.9 MiB。清理耗时中位数 14.461 → 14.917 秒，主要收益是内存边界和减少冗余写。
+
+显式运行的真实 Curvine 百万 namespace 测试通过：1,000,000 个空文件使用正常 create/complete 钩子与 journal 内部批量预置，SDK 实际计数；另有两个 SDK 写入的非空文件。零匹配策略检查 1,000,002 项、3908 页，耗时 139.310 秒；两个文件经实际 data-mover LocalArchive Release 后，三次普通 SDK 读合并为两个自动 Recall。强制停止、排除原 leader，从 follower checkpoint 恢复后再次核对计数、身份和完整内容。整个测试约 1043 秒。三 Master 和一 Worker 在同一 fixture 进程、独立目录，控制器为独立进程；这不是百万普通客户端写入吞吐或物理节点故障隔离测试。
+
+真实 PVE 另行完成 2000 个普通 SDK 空文件写入（16 并发、33.232 秒、零错误），以及新目录的普通 FUSE 写入、容量/访问时间策略、双副本物理 Release 和四读合并两次自动 Recall。三 Master 日志迁至各自独立 16 GiB 本地 SSD，旧日志保留；该硬件变化的收益与源码优化分开报告。Worker 仍为各节点本地盘，无 UFS。
+
+复现命令、环境、原始 JSON 与精确边界见 [完整规模测试报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/scale-validation.md)。本仓库测试入口为 `crates/hsm-curvine/tests/managed_cluster.rs` 的 `million_namespace_policy_recall_and_checkpoint_recovery`；native-integration 才启用 Curvine 的可选 `hsm-scale-test` fixture，普通服务器默认不启用。
+
 ## 真实 PVE 集群
 
 三个 Master、三个 Worker、两个普通块副本及独立 HSM 控制节点，不配置 UFS。应用通过 FUSE 写入和读取，没有 import 或显式 Recall。候选和任务位于 Curvine 权威元数据，不依赖外部 namespace 镜像。两轮测试及物理块检查见 [PVE-FUSE-HSM.md](PVE-FUSE-HSM.md)。
@@ -49,7 +61,7 @@ Curvine 使用已发布 hsm-core Git 依赖运行 `cargo test -p curvine-master 
 
 ## 边界与历史记录
 
-当前支持单硬链接、非 UFS 常规文件。策略是 GPFS 对应概念的类型化子集，不解析 GPFS 语法或任意权重表达式。索引分页减少目录扫描，但路径和部分条件仍后过滤，未做百万文件吞吐测试；元数据提交使用全局串行边界。
+当前支持单硬链接、非 UFS 常规文件。策略是 GPFS 对应概念的类型化子集，不解析 GPFS 语法或任意权重表达式。索引分页减少目录扫描；大小、owner 等条件已在当前路径解析前检查，但仍需 Record 回查，路径仍后过滤。已完成百万 Record 基准及内部批量预置的百万 namespace 验证，尚未验收百万普通客户端写入吞吐；元数据提交使用全局串行边界。
 
 Recall 为整文件恢复，私有恢复布局单副本，尚不参与普通块副本修复；全量覆盖可用，恢复布局上的追加与完整可变 POSIX 语义尚未覆盖。有活跃读取或归档保护时修改可能被拒绝。LocalArchive 单节点，控制者 Running 接管仍需显式 epoch。所有虚拟机在同一 PVE 物理机，没有生产 HA 承诺。搬运需要完整临时 spool。
 
