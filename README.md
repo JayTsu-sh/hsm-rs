@@ -26,3 +26,5 @@ cargo run -p hsm-local --bin hsm-local -- /tmp/hsm-local-example
 演示仅在指定目录中建立专用 source/archive，运行 Archive → Release → GC → Recall，并输出原实体身份和恢复内容。源与归档应使用专用、互不重叠的目录。
 
 本地参考是单主机、独占 root、经 Interface 访问的逻辑 namespace；支持持久成功结果及重开恢复，不提供跨节点 authority、透明 POSIX 召回或容量预留。Curvine 支持非 UFS 单硬链接常规文件自动纳管及本地归档；默认不开启，需按文档配置并使用匹配的 Master/Worker/FUSE 版本。Recall 私有布局仍是单副本，完整可变文件语义与生产 HA 尚未完成。构建及集群验证命令见 [Curvine Adapter](crates/hsm-curvine/README.md)。完整的生产协调和故障验收仍按设计推进。
+
+原版 Curvine 与引入 HSM 后的前台吞吐、尾延迟及扫描影响见 [性能对比报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/performance-comparison.md)。当前全局提交协调仍有明显的每文件操作开销。

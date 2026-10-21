@@ -53,6 +53,14 @@ Curvine 使用已发布 hsm-core Git 依赖运行 `cargo test -p curvine-master 
 
 复现命令、环境、原始 JSON 与精确边界见 [完整规模测试报告](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/scale-validation.md)。本仓库测试入口为 `crates/hsm-curvine/tests/managed_cluster.rs` 的 `million_namespace_policy_recall_and_checkpoint_recovery`；native-integration 才启用 Curvine 的可选 `hsm-scale-test` fixture，普通服务器默认不启用。
 
+## 原版 Curvine 与 HSM 的前台性能
+
+另外使用完全相同的 release 基准，分别测试原版 Curvine `feb3c9e2`、当前服务器/SDK 关闭 HSM、开启 HSM 自动纳管。每组独立新建三个 Master/一 Worker 的同进程 MiniCluster，SDK 通过真实 TCP/Raft 操作，禁用短路、无 UFS；三轮交替执行。普通读写保持 Online，不运行 Archive/Recall 搬运。
+
+16 并发创建并关闭空文件的吞吐中位数从原版 5690.5 降到开启 HSM 后的 96.9 ops/s，P99 从 3.242 增到 195.820 ms；空文件 open+complete 为 13292.9 → 94.0 ops/s。get_status 基本持平。当前主要结构性成本是全局提交串行边界和额外 barrier/受保护读取提交；本次没有修改这些生产路径。HSM 关闭组也有 SDK open 探测开销，不能等同于原版。
+
+完整元数据、小文件、加长大文件测试和扫描并发结果、原始 JSON、源码/二进制指纹及复现方法见 [原版与 HSM 性能对比](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/performance-comparison.md)。这些同主机 SDK 工程基线与百万 namespace 验证属于不同范围，不是 PVE 上原版/HSM 的 A/B 或生产吞吐 SLO。
+
 ## 真实 PVE 集群
 
 三个 Master、三个 Worker、两个普通块副本及独立 HSM 控制节点，不配置 UFS。应用通过 FUSE 写入和读取，没有 import 或显式 Recall。候选和任务位于 Curvine 权威元数据，不依赖外部 namespace 镜像。两轮测试及物理块检查见 [PVE-FUSE-HSM.md](PVE-FUSE-HSM.md)。
