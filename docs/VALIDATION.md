@@ -4,7 +4,7 @@
 
 ## 构建来源
 
-发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。hsm-curvine 的 Cargo.toml 固定 Curvine `826a2ae9be052b2bf86d1a1647551e396adfcc5f`；Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
+首次发布版本（2026-10-21）合入 hsm-rs main 与 Jay fork 的 Curvine main。当前 hsm-curvine 的 Cargo.toml 固定过渡微批代码 `ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec`；下文 P1 验收所用的历史 Curvine 提交是 `826a2ae9be052b2bf86d1a1647551e396adfcc5f`。Curvine 固定 hsm-core `ef5167661da40345a25f5d028dbeb4f1a70b1398`；实际 data-mover-rs 固定为 `11fac12eee028c679293e4df6220584512561487`。Cargo.lock 包含可从 GitHub 获取的源地址，无需本地路径补丁。本轮没有修改带库后端。
 
 从本仓库克隆后，可直接执行：
 
@@ -68,6 +68,12 @@ hsm-curvine 的 Curvine Git 依赖更新到 `826a2ae9be052b2bf86d1a1647551e396ad
 另显式运行百万 namespace 测试 **1 通过**。内部批量预置 1,000,000 个文件，零匹配策略扫描 1,000,002 项、3908 页；两份普通 SDK 写入的非空文件经策略 Release 和 LocalArchive 搬运，三次普通读取触发两次自动 Recall。排除旧 leader 后从 checkpoint 恢复，身份、驻留和内容逐项保持。结果原始 JSON 与改造前后 release 性能对照见 [Curvine 提交回执验收](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/commit-receipts.md)。百万建库采用内部批量 fixture，三个 Master 与一个 Worker 仍在同一测试进程内的独立目录；不能视为物理机 HA 或百万普通 RPC 写入吞吐验收。规模测试与 Git 依赖编译曾重叠，其耗时不用作性能收益对比。
 
 相同 HSM 开启语义下的三轮 release 配对测量：16 并发 create+complete 从 95.7 提高到 198.1 ops/s，rename 从 205.3 到 389.2 ops/s，delete 从 202.0 到 400.4 ops/s；普通修改区间空 HSM barrier 为 0。64 MiB 4 并发写入中位吞吐 1040.8 → 1166.3 MiB/s，但 P99 369.44 → 489.81 ms，读取中位吞吐 2497.7 → 2399.1 MiB/s；不能宣称大文件路径稳定改善。测试方法、全部轮次和二进制指纹见 [改造前后性能结果](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/commit-receipt-results.md)。
+
+## 2026-10-21 普通元数据过渡微批验收
+
+hsm-curvine 的八个 Curvine Git 依赖及 Cargo.lock 均固定 `ad7fdaa2667cf1ce1c7fd614989c56e82d6560ec`。取消本地 path patch，执行 `CXXFLAGS=-g0 cargo test --workspace --locked --features hsm-curvine/native-integration -j 6 -- --test-threads=1`：**30 通过、0 失败、2 ignored**。五项真实多进程集群测试全部通过，覆盖策略 Release、普通读取自动 Recall、访问废弃旧 Release、进程重启及换主；两个 ignored 分别为子进程 fixture 与需显式启动的百万规模测试。`cargo fmt --all --check` 与 `git diff --check` 通过。开发环境日志位于 `/work/jay/hsm/research/p2-git-integration-final.log`。
+
+Curvine 在最终 `ad7fdaa2` 上 journal 单元 **27 通过**，Master HSM 相关单元 **8 通过、1 ignored**。百万 namespace 闭环另在首个 P2 提交 `76c624f5` 上显式通过；后续提交只把批前固定 750 微秒等待改为一次调度让出，并增加基准连接池参数。三轮 P1/P2 同语义 release 对照中，16 条 Master 连接下 256 次并发 create+complete 的实际 Raft flush 从 512 降到 64，中位吞吐 202.2→1322.8 ops/s、P99 93.89→13.26 ms；默认单连接 smoke 为 187.19→189.90 ops/s，flush 均 32。读侧尚未合批，`get_status` 在该 VM 上约慢 13%，大文件结果波动大。方法、全部逐轮数据、限制和二进制指纹见 [Curvine 过渡微批验收](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/mutation-microbatch-results.md)。这不代表已完成统一 committed 状态机、跨物理故障域 HA 或 PVE 集群升级验收。
 
 ## 真实 PVE 集群
 
