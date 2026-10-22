@@ -87,7 +87,28 @@ Curvine 在最终 `ad7fdaa2` 上 journal 单元 **27 通过**，Master HSM 相�
 
 进程重启用例增加普通文件已提交删除、尚待物理清理的场景。保留磁盘目录并排除旧 Leader 后，要求首次 Exists 自身正确、HSM Record 不存在、退休义务仍能处理并最终得到 Worker 删除确认。此测试曾复现普通 Exists 读取旧前缀；ReadIndex 后即正确，说明删除日志未丢失，修正的是元数据查询资格。该用例使用 Master/Worker 进程组重启，不能等同于独立物理节点/磁盘故障验收。
 
-本轮没有升级 PVE，没有运行百万验收或生成优化后的原版性能差值；历史数值保持各自冻结版本的适用范围。rename、递归及后台修改迁移、队列调度与组合故障验收仍待完成。
+以上为截至 `122d9535` 的累计记录。本轮没有升级 PVE，没有运行当前版本的百万验收或生成优化后的原版性能差值；历史数值保持各自冻结版本的适用范围。后续目录和后台改造见下节。
+
+## 2026-10-22 目录、后台删除与 Native Resize
+
+八个 Curvine 直接 Git 依赖与 lock 的 29 个 Curvine 包固定 `6a60ef60f6dc1b10f0d830a9f265e4a0d20a3b9a`，其他包的版本和依赖关系不变。该版本新增紧凑 namespace journal v5 和 `hsm_native_v6` checkpoint 栅栏，要求全部 Master 使用匹配实现；未升级 PVE。
+
+目录 rename/替换/交换、递归 SetAttr/Delete 和无挂载 TTL Delete 由已提交输入原子发布。Resize/AssignWorker 同样保存原始结果与退休事实。共享 ReadIndex 队列只合并证明开始前入队的请求；旧任期、证明失败及 I/O 期间后来到达的请求不能借用资格。配额跳过不计回收进度，同步回收工作进入 blocking 线程。Curvine 的 260 项 Master 测试和两个真实集群优化用例已通过。
+
+增强的进程组重启回归先写入两个普通文件，对保留文件做部分截断，改名父目录并递归更新 owner/mode，再删除另一个子目录。保留磁盘目录、排除旧 Leader 重启后，首次 Exists 必须正确；保留文件的 inode、长度、属性及内容不变，已删除文件的 HSM Record 不存在，持久清理最终取得 Worker 确认。它仍是进程组冷恢复，不能充当单节点在线故障、网络分区或磁盘丢失验收。
+
+属性响应的 xattr 按键排序编码，保持原 protobuf wire tag/type。重启测试还保存原始 Native 属性请求及响应，在删除子目录、改变目录状态后换主，要求重试返回完全相同的原始响应字节，不能重新生成当前目录状态。
+
+固定来源的组合验证命令（不使用 path patch）：
+
+```bash
+CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace \
+  --features hsm-curvine/native-integration -j 6
+```
+
+固定 Git 来源回归结果：**30 项功能测试通过、0 失败、2 ignored**，全部文档测试执行成功。五个 managed 场景全部通过；增强的进程组重启用例包含部分截断、目录改名、递归属性、持久删除和原始属性响应逐字节比较。独立 native SDK 搬运场景也通过。两个 ignored 分别为父测试显式启动的子进程 fixture 与未执行的百万规模测试。日志：`research/hsm-namespace-canonical-git-pinned.log`（相对于 `/work/jay/hsm`）。
+
+默认 feature 的 workspace 测试不启动真实 Curvine 场景；必须显式开启 `native-integration`。当前仍未完成所有稀有 RPC 迁移、完整业务优先级调度和组合故障矩阵，没有把资格证明合批描述为完整业务调度器。当前百万验收及最终原版对比继续暂缓。
 
 ## 边界与历史记录
 

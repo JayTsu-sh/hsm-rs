@@ -252,11 +252,13 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         assert_eq!(storage.inspect(&initial.data.entity).await?,dual);
         let pin=storage.prepare_archive(&context("held-pin"),&initial.data).await?;
         assert!(matches!(engine.release(&context("busy-release"),&dual).await,Err(HsmError::Busy(_))));
-        // Commit an ordinary unlink before restarting every process. Its
-        // physical GC must survive without either inode or HSM Record.
+        // Replay compact rename/recursive attributes/delete and native resize
+        // after a cold leader change; GC survives without inode or Record.
         use curvine_fs_api::Writer;
-        let retired_path = curvine_fs_api::Path::from_str("/retired-across-restart")?;
-        let mut retired_writer = fs.create(&retired_path, false).await?;
+        let before_dir = curvine_fs_api::Path::from_str("/compact-before-restart")?;
+        let after_dir = curvine_fs_api::Path::from_str("/compact-after-restart")?;
+        let retired_path = curvine_fs_api::Path::from_str("/compact-before-restart/retire/data")?;
+        let mut retired_writer = fs.create(&retired_path, true).await?;
         retired_writer.write(b"retired across restart").await?;
         retired_writer.complete().await?;
         let retired_status = fs.get_status(&retired_path).await?;
@@ -264,11 +266,55 @@ fn managed_roundtrip_survives_process_restart() -> Result {
             entity: retired_status.id.to_string(), ..initial.data.entity.clone()
         };
         assert!(storage.inspect(&retired_entity).await.is_ok());
-        assert_eq!(fs.delete(&retired_path, false).await?.inodes, 1);
+        let keep_before = curvine_fs_api::Path::from_str("/compact-before-restart/keep")?;
+        let mut keep_writer = fs.create(&keep_before, false).await?;
+        keep_writer.write(b"keep across restart").await?;
+        keep_writer.complete().await?;
+        let keep_id = fs.get_status(&keep_before).await?.id;
+        fs.resize(&keep_before, curvine_model::FileAllocOpts::with_truncate(4)).await?;
+        assert!(fs.rename(&before_dir, &after_dir).await?);
+        // Retain the exact request/response across restart. Randomized xattr
+        // map iteration must not change a replicated original response.
+        let attribute_request = curvine_proto::NativeMutationRequest {
+            version: 1, incarnation: initial.data.entity.namespace.clone(),
+            session: format!("{:016x}{}", curvine_runtime::common::LocalTime::mills(), curvine_model::hsm::native::token()),
+            sequence: 1, acknowledged: 0, code: curvine_fs_api::RpcCode::SetAttr as u32,
+            header: curvine_model::ProtoUtils::encode(curvine_proto::SetAttrRequest {
+                path: after_dir.encode(),
+                opts: curvine_model::ProtoUtils::set_attr_opts_to_pb(curvine_model::SetAttrOpts { recursive: true,
+                    owner: Some("restart-policy-owner".into()), mode: Some(0o750),
+                    add_x_attr: (0..16).map(|i| (format!("user.restart-{i}"), vec![i])).collect(),
+                    ..Default::default() }),
+            })?.to_vec(),
+        };
+        let attribute_response: curvine_proto::NativeMutationResponse = fs.fs_client()
+            .rpc(curvine_fs_api::RpcCode::NativeMutation, attribute_request.clone()).await?;
+        assert!(attribute_response.success);
+        let retired_path = curvine_fs_api::Path::from_str("/compact-after-restart/retire/data")?;
+        let retired_dir = curvine_fs_api::Path::from_str("/compact-after-restart/retire")?;
+        let keep_after = curvine_fs_api::Path::from_str("/compact-after-restart/keep")?;
+        assert_eq!(fs.delete(&retired_dir, true).await?.inodes, 1);
         let old_leader=fs.get_filesystem_info().await?.active_master;
         processes.restart(&old_leader)?;
         eprintln!("phase: restarted on another leader");
         assert!(!fs.exists(&retired_path).await?, "metadata query served the pre-delete prefix after leader restart");
+        assert!(!fs.exists(&before_dir).await?);
+        assert!(!fs.exists(&retired_dir).await?);
+        let keep_status = fs.get_status(&keep_after).await?;
+        assert_eq!(keep_status.id, keep_id);
+        assert_eq!(keep_status.len, 4);
+        assert_eq!(keep_status.owner, "restart-policy-owner");
+        assert_eq!(keep_status.mode, 0o750);
+        let mut keep_reader = fs.open(&keep_after).await?;
+        let mut kept = vec![];
+        while keep_reader.has_remaining() { kept.extend_from_slice(keep_reader.async_read(None).await?.as_slice()); }
+        keep_reader.complete().await?;
+        assert_eq!(kept, b"keep");
+        let retried_attributes: curvine_proto::NativeMutationResponse = fs.fs_client()
+            .rpc(curvine_fs_api::RpcCode::NativeMutation, attribute_request).await?;
+        assert_eq!(retried_attributes, attribute_response,
+            "attribute original result changed after replay on another leader");
+        assert_eq!(fs.get_status(&after_dir).await?.children_num, 1);
         assert!(matches!(storage.inspect(&retired_entity).await, Err(HsmError::NotFound(_))));
         let gc = NativeControl::new(fs.clone());
         let collect = || gc.exchange(br#"{"op":"gc_batch"}"#.to_vec());
