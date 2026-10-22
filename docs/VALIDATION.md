@@ -136,3 +136,16 @@ CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace
 Recall 为整文件恢复，私有恢复布局单副本，尚不参与普通块副本修复；全量覆盖可用，恢复布局上的追加与完整可变 POSIX 语义尚未覆盖。有活跃读取或归档保护时修改可能被拒绝。LocalArchive 单节点，控制者 Running 接管仍需显式 epoch。所有虚拟机在同一 PVE 物理机，没有生产 HA 承诺。搬运需要完整临时 spool。
 
 [v0.5 PVE 原语测试记录](PVE-HSM-SCENARIO.md)保留为历史：当时是 import、策略显式 Recall，普通 FUSE 返回 EIO。本轮 v0.6 的普通 FUSE 自动纳管和透明 Recall 已新增，不能混用两轮结论。旧的严格 Clippy、固定 Git pin 和不可变文件限制也仅对应当时版本。
+
+
+## 2026-10-22 文件级条件提交与 namespace 共享绑定
+
+八个直接依赖及 lock 的 29 个 Curvine Git 包固定 `ad3391bd3cc21cf6ab6f721026c3cc069bbfa3f1`；其他 lock 内容逐字节保持，没有路径覆盖。执行 `CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace --features hsm-curvine/native-integration -j 6`：**32 项功能测试通过、0 失败、3 ignored**，四个 crate 的全部文档测试执行成功。格式与差异检查通过。
+
+本轮 Source 改为文件级 HSM 控制、Seal 和只读查询共享资格，Native/Import 统一 inode 预留，已有 namespace 的新 SDK 会话绑定也共享读取。新条件日志在版本/路径/create 观察过期时返回 Busy，既不发布状态，也不固化失败绑定；同一逻辑身份可重新准备。业务拒绝则重新独占检查。新增 `hsm_native_v7` checkpoint 栅栏，全部 Master 必须匹配代码；详见[Source 设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/conditional-controls.md)。
+
+七个真实 managed 场景全部通过（86.71 秒）：普通策略归档/释放与并发自动 Recall；旧 Release 观察废弃；目录/截断冷恢复；CLI 策略及控制者接管；批量原始结果跨进程重启；独立 Master 两次在线选主/旧 Leader 恢复；后台执行暂停时普通读取仍独立 Recall。单独 native 搬运与原语保护用例也通过（17.81 秒）。三个 ignored 仍是百万规模用例和两个由父测试显式启动的子进程 fixture。
+
+Curvine Root 另有 **276 项 Master、两个 TCP/Raft 用例通过**。新增集群检查同时执行 16 个 Import 与 16 个 Native 创建，保持一个共享资格不释放，并验证 32 个 inode 不重复；回归先暴露 SDK 绑定已有 namespace 仍申请独占资格，修复后通过。还检查了新读者拒绝已准备 Release 且不丢失读租约、过期计划不写 RocksDB/绑定、同身份重试及旧日志语义。
+
+原始日志为开发环境 `research/hsm-conditional-final-root.log`、`research/hsm-conditional-fixed-git.log`，相对 `/work/jay/hsm`。没有升级 PVE，没有执行本版本百万规模负载或最终原版性能比较；策略/任务跨记录协调及旧后台路径尚在优化，物理 Worker/磁盘故障矩阵仍按 HA 设计推进。

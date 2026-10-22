@@ -31,3 +31,6 @@ cargo run -p hsm-local --bin hsm-local -- /tmp/hsm-local-example
 
 
 最新改造增加公开批量写的单一持久身份、目录共享等待、Master 的 Recall/前台/后台加权资格，以及常驻 worker 的独立 Recall/后台执行通道。任务仍在 Curvine，按 Source 已有索引分类分页。独立进程在线两次选主、原始批量结果重放和后台暂停期间普通读取自动 Recall 的范围见[最新验证记录](docs/VALIDATION.md#2026-10-22-批量写加权调度与独立执行通道)。这些改造不表示百万性能验收、最终原版对照或全部生产 HA 能力已经完成。
+
+
+文件级 HSM 控制与 Seal 已接入共享条件提交，Native 创建与 Import 共用 inode 预留器；已有 namespace 的新会话绑定也不再独占。过期准备返回可重试 Busy，保留原操作身份重新准备；持久业务拒绝会重新独占检查。Curvine 侧设计与保留边界见[文件级条件提交](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/conditional-controls.md)。没有增加外部元数据镜像。
