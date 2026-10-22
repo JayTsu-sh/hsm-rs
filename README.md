@@ -34,3 +34,6 @@ cargo run -p hsm-local --bin hsm-local -- /tmp/hsm-local-example
 
 
 文件级 HSM 控制与 Seal 已接入共享条件提交，Native 创建与 Import 共用 inode 预留器；已有 namespace 的新会话绑定也不再独占。过期准备返回可重试 Busy，保留原操作身份重新准备；持久业务拒绝会重新独占检查。Curvine 侧设计与保留边界见[文件级条件提交](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/conditional-controls.md)。没有增加外部元数据镜像。
+
+
+生命周期控制现已使用 Source 有界检查集共享提交：策略更新/扫描入队、任务 claim/finish 和 GC 不再独占等待 Raft；Recall 认领/完成按任务实际 action 使用独立接入类别。容量逻辑预算、候选版本/当前路径/副本数和动作原始结果均在提交前检查。固定源码及增强的在线 HA 结果见[最新验证](docs/VALIDATION.md#2026-10-22-生命周期共享提交与任务跨换主恢复)，Source 的采样/资源边界见[详细设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lifecycle-shared-commit.md)。

@@ -149,3 +149,23 @@ Recall 为整文件恢复，私有恢复布局单副本，尚不参与普通块�
 Curvine Root 另有 **276 项 Master、两个 TCP/Raft 用例通过**。新增集群检查同时执行 16 个 Import 与 16 个 Native 创建，保持一个共享资格不释放，并验证 32 个 inode 不重复；回归先暴露 SDK 绑定已有 namespace 仍申请独占资格，修复后通过。还检查了新读者拒绝已准备 Release 且不丢失读租约、过期计划不写 RocksDB/绑定、同身份重试及旧日志语义。
 
 原始日志为开发环境 `research/hsm-conditional-final-root.log`、`research/hsm-conditional-fixed-git.log`，相对 `/work/jay/hsm`。没有升级 PVE，没有执行本版本百万规模负载或最终原版性能比较；策略/任务跨记录协调及旧后台路径尚在优化，物理 Worker/磁盘故障矩阵仍按 HA 设计推进。
+
+
+## 2026-10-22 生命周期共享提交与任务跨换主恢复
+
+八个直接依赖及 lock 的 29 个 Curvine 包固定 `d5e88f1d03f399ffd31099b8a4887ecfea2fbc7e`。其他锁文件内容逐字节保持，没有路径覆盖。执行 `CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace --features hsm-curvine/native-integration -j 6`，最终回归 **32 项功能通过、0 失败、3 ignored，四个 crate 的全部文档测试执行成功**；格式与差异检查通过。
+
+Source 的策略更新、扫描入队、claim/finish 和显式 GC 使用共享条件提交。新的有界检查集包括 namespace、策略/任务/游标/活动标记、候选版本/路径/副本数、动作 outcome（含不存在）和容量策略逻辑待释放预算；失效不写永久失败结果。Recall 任务的认领、完成和详情按存储中 action 分类，后台接入满额不占 Recall 名额。新 CF 栅栏 `hsm_native_v8` 要求全部 Master 匹配；水位遥测与物理空间预留的区别见[Source 设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lifecycle-shared-commit.md)。
+
+七个 managed 场景通过（88.49 秒），其中独立 Master 的在线故障测试现在覆盖完整任务状态：
+
+1. 真正写入约 2 MiB 的普通文件，通过 data-mover/LocalArchive 归档为 Dual；Source 保存 Release 策略、入队并取得 Running claim。
+2. 暂停当前 Leader，由两个存活节点选主。普通读取校验全部内容，原 claim 请求仍返回原 token/结果，原 policy_put 请求也返回原成功结果。
+3. 因读取改变观察，执行器报告旧任务 Superseded；策略重新选择当前观察，认领新任务并实际 Release，finish 必须由 Source 的动作成功结果确认 Done/Offline。
+4. 恢复旧 Master，再暂停替代 Leader，剩余节点再次选主。任务 Done 与原 finish 结果保持；执行真实 Recall 为 Dual，校验 inode/完整内容后重试旧 finish，仍必须返回原 Offline 结果。
+
+这验证 Master 选举不重置 controller 资格或 claim，不要求在外部重建任务镜像；它不是执行器进程丢失后的自动接管、网络分区或 Worker 磁盘故障测试。常驻 worker 后台暂停时普通读取独立 Recall 的测试、冷恢复和其他策略场景也继续通过；单独 native 搬运用例通过（23.80 秒）。三个 ignored 仍为百万规模用例及两个父测试显式启动的子进程 fixture。
+
+Curvine Root 另有 **283 项 Master 与两个 TCP/Raft 用例通过**，包括不同候选并行入队、容量预算重检、动作成功结果与旧失败报告的竞争、新读者阻止旧 claim 发布，以及后台接入满额时 Recall 的独立名额。测试暂停 hook 只在 hsm-scale-test 编译。原始日志为开发环境 `research/hsm-lifecycle-priority-final.log` 和 `research/hsm-lifecycle-fixed-git-final.log`（相对 `/work/jay/hsm`）；首次固定来源回归另有 `research/hsm-lifecycle-fixed-git.log`。
+
+未升级 PVE，未执行本版本百万规模持续负载或最终原版性能比较。少数原始 RPC、失联 Worker 清理/UFS 缓存失效等旧后台路径仍保留独占协调；完整优化与物理 HA 矩阵尚未全部完成。

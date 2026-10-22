@@ -2,6 +2,7 @@
 use super::*;
 use curvine_fs_api::{Reader, Writer};
 use curvine_model::{CreateFileOpts, OpenFlags, ProtoUtils};
+use hsm_core::{IntentCompletion, IntentStatus, LifecyclePolicy, LifecycleStorage};
 
 #[test]
 #[ignore = "subprocess fixture for live leader pause/rejoin"]
@@ -227,6 +228,21 @@ fn ordinary_hsm_and_batch_results_survive_live_leader_pause_and_rejoin() -> Resu
         let dual = engine.archive(&context("live-archive"), &initial.data, &key).await?;
         assert_eq!(dual.residency, Residency::Dual);
         eprintln!("live phase: archived");
+        // Persist policy admission and a live executor claim before losing the
+        // Master. Master elections must not reset controller ownership or
+        // require rebuilding an external task/namespace mirror.
+        let policy: LifecyclePolicy = serde_json::from_value(serde_json::json!({
+            "id":"live-release", "revision":1,"enabled":true,"prefix":"/live-hsm",
+            "min_size":0,"max_size":null,"min_residency_ms":0,"action":"release","backend":"live-archive"
+        }))?;
+        let policy_context = context("live-policy-put");
+        assert_eq!(storage.put_policy(&policy_context, &policy, None).await?, policy);
+        let selected = storage.scan_policy(&context("live-scan-before-failover"), &policy.id, None, 256).await?;
+        let first_task = selected.admitted.first().ok_or("release policy did not admit the Dual file")?;
+        let claim_context = context("live-claim-before-failover");
+        let first_claim = storage.claim_intent(&claim_context, first_task, "live-executor").await?;
+        assert_eq!(first_claim.status, IntentStatus::Running);
+
         let item = |path: &str| curvine_proto::CreateFileRequest {
             path: path.into(), opts: ProtoUtils::create_opts_to_pb(CreateFileOpts::with_create(true), "live-batch"),
             flags: OpenFlags::new_create().set_overwrite(false).value(),
@@ -252,6 +268,13 @@ fn ordinary_hsm_and_batch_results_survive_live_leader_pause_and_rejoin() -> Resu
         assert_ne!(first_leader, next_leader);
         eprintln!("live phase: replacement elected {next_leader}");
         assert_eq!(read_all(&fs, &path).await?, bytes);
+        let recovered_claim = retry_action(|| storage.claim_intent(&claim_context, first_task, "live-executor")).await?;
+        assert_eq!(recovered_claim, first_claim, "lost claim response did not retain its original token/result");
+        assert_eq!(storage.intent(&context("live-inspect-claim"), first_task).await?, first_claim);
+        assert_eq!(storage.put_policy(&policy_context, &policy, None).await?, policy);
+        let superseded = storage.finish_intent(&context("live-supersede-accessed"), &first_claim,
+            IntentCompletion::Superseded("foreground read changed the release observation".into())).await?;
+        assert_eq!(superseded.status, IntentStatus::Superseded);
         let repeated: curvine_proto::NativeMutationResponse = fs.fs_client()
             .rpc(curvine_fs_api::RpcCode::NativeMutation, batch.clone()).await?;
         assert_eq!(repeated, original);
@@ -265,8 +288,15 @@ fn ordinary_hsm_and_batch_results_survive_live_leader_pause_and_rejoin() -> Resu
         // Re-observe it; the pre-read snapshot must not authorize release.
         let current = storage.inspect(&initial.data.entity).await?;
         assert_eq!(current.residency, Residency::Dual);
-        let release_context = context("live-release");
-        let offline = retry_action(|| engine.release(&release_context, &current)).await?;
+        let selected = storage.scan_policy(&context("live-scan-after-access"), &policy.id, None, 256).await?;
+        let release_task = selected.admitted.first().ok_or("policy did not re-admit the new observation")?;
+        let release_claim = storage.claim_intent(&context("live-claim-new-observation"), release_task, "live-executor").await?;
+        assert_eq!(release_claim.expected, current);
+        let offline = retry_action(|| engine.release(&release_claim.context, &release_claim.expected)).await?;
+        let finish_context = context("live-finish-release");
+        let finished = storage.finish_intent(&finish_context, &release_claim, IntentCompletion::Done).await?;
+        assert_eq!(finished.status, IntentStatus::Done);
+        assert_eq!(finished.result.as_ref(), Some(&offline));
         assert_eq!(offline.residency, Residency::Offline);
         eprintln!("live phase: released");
         assert_eq!(storage.resolve(path.path()).await?.residency, Residency::Offline);
@@ -278,16 +308,22 @@ fn ordinary_hsm_and_batch_results_survive_live_leader_pause_and_rejoin() -> Resu
         let recall_leader = changed_leader(&fs, &next_leader).await?;
         assert_ne!(recall_leader, next_leader);
         eprintln!("live phase: resumed quorum elected {recall_leader}");
+        assert_eq!(storage.intent(&context("live-recovered-done"), release_task).await?, finished);
+        assert_eq!(storage.finish_intent(&finish_context, &release_claim, IntentCompletion::Done).await?, finished);
+        assert_eq!(storage.put_policy(&policy_context, &policy, None).await?, policy);
+
         let recall_context = context("live-recall");
         let restored = retry_action(|| engine.recall(&recall_context, &offline, &key)).await?;
         assert_eq!(restored.residency, Residency::Dual);
         assert_eq!(restored.data, initial.data);
         assert_eq!(read_all(&fs, &path).await?, bytes);
         cluster.signal(&next_leader, "-CONT")?;
+        assert_eq!(storage.finish_intent(&finish_context, &release_claim, IntentCompletion::Done).await?, finished,
+            "finish retry regenerated the current Dual state instead of the original Offline result");
         let repeated: curvine_proto::NativeMutationResponse = fs.fs_client()
             .rpc(curvine_fs_api::RpcCode::NativeMutation, batch).await?;
         assert_eq!(repeated, original);
-        println!("verified live HA: pause active Master, elect with two survivors, resume stale Master, pause replacement Leader and elect again; batch original result and HSM Dual -> Offline -> Dual retain inode/content");
+        println!("verified live HA: pause active Master, elect with two survivors, resume stale Master, pause replacement Leader and elect again; policy, original claim/finish and batch results survive; HSM Dual -> Offline -> Dual retains inode/content");
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })
 }

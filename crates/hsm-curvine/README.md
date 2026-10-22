@@ -69,4 +69,9 @@ cargo fmt --all --check
 常驻 `worker` 现在为 Recall 和 Archive/Release 各保留一个执行位置；后台轮次继续扫描/Seal，Recall 单独取 Source 的 ready work class。`--max-actions` 为每通道每轮上限，JSON 报告的 `lane` 区分 recall/background；`--once` 仍只执行一个顺序轮次。使用匹配的 Source 版本，分类分页仍返回不透明游标，不允许跨类别复用。工作认领、结果及失败恢复仍由 Curvine 控制。
 
 
-Curvine 文件级控制和 Seal 现在共享资格等待 Raft，提交时核对版本与当前路径。并发读写使准备过期时 Source 返回 Busy，不创建永久失败 outcome；重试保持原 operation_id 和动作输入，由 Source 重新准备。业务观察已经变化时仍按 Conflict/Superseded 处理，不能把旧 Release 观察改成当前状态继续执行。Native 创建与私有 Import 使用同一个 inode 预留器，首次 namespace 创建/升级才独占；完整设计与格式 `hsm_native_v7` 的版本要求见[文件级条件提交](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/conditional-controls.md)。策略更新/入队、claim/finish 等跨记录控制仍保留隔离。
+Curvine 文件级控制和 Seal 现在共享资格等待 Raft，提交时核对版本与当前路径。并发读写使准备过期时 Source 返回 Busy，不创建永久失败 outcome；重试保持原 operation_id 和动作输入，由 Source 重新准备。业务观察已经变化时仍按 Conflict/Superseded 处理，不能把旧 Release 观察改成当前状态继续执行。Native 创建与私有 Import 使用同一个 inode 预留器，首次 namespace 创建/升级才独占；完整设计与格式 `hsm_native_v7` 的版本要求见[文件级条件提交](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/conditional-controls.md)。后续的策略更新/入队与 claim/finish 已通过有界检查集共享提交，见下文。
+
+
+Source 的生命周期控制采用独立封装 `hsm-lifecycle-conditional-v1` 与 checkpoint 栅栏 `hsm_native_v8`。提交检查覆盖策略/任务/活动标记、候选 Record 合并版本与当前路径/副本数、动作 outcome 的存在性，以及水位策略读到的逻辑待释放预算。过期时返回 Busy，不保存该次失败绑定；namespace 改变返回 Fenced。水位仍基于 Worker 遥测，不能把逻辑预算解释为物理容量强预留。
+
+Recall 任务的 claim/finish/get 由 Source 根据不可变 action 分类，独立接入名额贯穿 gate；真实状态检查仍通过 ReadIndex 和条件发布。增强的独立 Master 故障测试覆盖策略与 Running claim 换主恢复、旧观察 Superseded 后重新筛选、实际 Release 后 Done、再次换主及 Recall 后原 finish 结果保持。源码、命令和原始日志见[验证记录](../../docs/VALIDATION.md#2026-10-22-生命周期共享提交与任务跨换主恢复)。
