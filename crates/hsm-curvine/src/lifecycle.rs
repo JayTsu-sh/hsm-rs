@@ -6,6 +6,28 @@ use hsm_core::{
 };
 use serde_json::json;
 
+/// Independent execution capacity, backed by source-owned work index ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkClass {
+    /// Read-triggered restore work.
+    Recall,
+    /// Archive and Release policy work.
+    Background,
+}
+impl WorkClass {
+    /// Stable wire spelling for native control requests.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recall => "recall",
+            Self::Background => "background",
+        }
+    }
+    /// Verify the source obeyed the requested queue boundary.
+    pub fn accepts(self, action: &hsm_core::ManagedAction) -> bool {
+        matches!(action, hsm_core::ManagedAction::Recall(_)) == (self == Self::Recall)
+    }
+}
+
 impl CurvineStorage<NativeControl> {
     /// Create or conditionally revise a source-owned policy.
     pub async fn put_policy(
@@ -79,6 +101,21 @@ impl CurvineStorage<NativeControl> {
         )
         .await
     }
+    /// Seek one source-owned work class directly. `after` remains an opaque
+    /// source cursor; callers never construct RocksDB keys or mirror tasks.
+    pub async fn ready_intents_in(
+        &self,
+        ctx: &OperationContext,
+        class: WorkClass,
+        after: Option<&str>,
+        limit: usize,
+    ) -> HsmResult<LifecyclePage<LifecycleIntent>> {
+        self.native_call(
+            json!({"op":"intent_list","context":ctx,"after":after,"limit":limit,"ready_only":true,"work_class":class.as_str()}),
+            "page",
+        ).await
+    }
+
     /// Bounded durable task listing; no client-side namespace mirror.
     pub async fn intents(
         &self,

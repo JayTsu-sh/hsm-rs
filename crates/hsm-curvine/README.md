@@ -64,3 +64,6 @@ cargo fmt --all --check
 策略字段、元数据索引、容量水位、周期预算、普通写入钩子及访问触发过程见 [实现设计](../../docs/DESIGN.md)。配置和跨节点实测见 [验收记录](../../docs/VALIDATION.md)。
 
 当前仍不提供完整 GPFS 策略文本解析、恢复布局上的追加写、受管硬链接、硬容量预留或磁带后端。Recall 的私有 Worker 布局仍为单副本。没有完整断电、盘损坏和生产故障矩阵验证；失败资源的保护以存储事实为准。
+
+
+常驻 `worker` 现在为 Recall 和 Archive/Release 各保留一个执行位置；后台轮次继续扫描/Seal，Recall 单独取 Source 的 ready work class。`--max-actions` 为每通道每轮上限，JSON 报告的 `lane` 区分 recall/background；`--once` 仍只执行一个顺序轮次。使用匹配的 Source 版本，分类分页仍返回不透明游标，不允许跨类别复用。工作认领、结果及失败恢复仍由 Curvine 控制。

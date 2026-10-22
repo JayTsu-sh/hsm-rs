@@ -4,7 +4,7 @@ use curvine_client_core::file::CurvineFileSystem;
 use curvine_config::ClusterConf;
 use curvine_runtime::runtime::RpcRuntime;
 use hsm_core::{HsmError, HsmResult, IntentStatus, LifecyclePolicy, OperationContext};
-use hsm_curvine::{CurvineDataMover, CurvineStorage, NativeControl};
+use hsm_curvine::{CurvineDataMover, CurvineStorage, NativeControl, WorkClass};
 use hsm_engine::HsmEngine;
 use hsm_local::{LocalArchive, LocalDataMover};
 use serde::Serialize;
@@ -299,6 +299,7 @@ struct WorkerOptions {
 }
 #[derive(Serialize)]
 struct CycleReport {
+    lane: &'static str,
     admitted: usize,
     executed: usize,
     failed: usize,
@@ -324,40 +325,110 @@ async fn worker(
     )?;
     let engine = HsmEngine::new(storage.clone(), archive, CurvineDataMover::new(fs));
     let owner = curvine_model::hsm::native::token();
-    loop {
-        match cycle(
+    if options.once {
+        let report = cycle(
             &storage,
             &engine,
             &backend_id,
             epoch,
             &owner,
             options.max_actions,
+            None,
         )
-        .await
-        {
-            Ok(report) => {
-                print(&report)?;
-                if options.once {
-                    return if report.failed + report.retry == 0 {
-                        Ok(())
-                    } else {
-                        Err(HsmError::Busy(
-                            "tasks require reconciliation; inspect jobs".into(),
-                        ))
-                    };
-                }
-            }
+        .await?;
+        print(&report)?;
+        return if report.failed + report.retry == 0 {
+            Ok(())
+        } else {
+            Err(HsmError::Busy(
+                "tasks require reconciliation; inspect jobs".into(),
+            ))
+        };
+    }
+    let recall_owner = format!("{owner}-recall");
+    // Each lane owns at most one effect. A slow Archive cannot occupy the
+    // Recall lane, and a continuous stream of Recalls cannot starve Archive.
+    tokio::try_join!(
+        worker_lane(
+            &storage,
+            &engine,
+            &backend_id,
+            epoch,
+            &owner,
+            &options,
+            WorkClass::Background
+        ),
+        worker_lane(
+            &storage,
+            &engine,
+            &backend_id,
+            epoch,
+            &recall_owner,
+            &options,
+            WorkClass::Recall
+        ),
+    )?;
+    Ok(())
+}
+
+async fn worker_lane(
+    storage: &Storage,
+    engine: &Engine,
+    backend_id: &str,
+    epoch: u64,
+    owner: &str,
+    options: &WorkerOptions,
+    class: WorkClass,
+) -> HsmResult<()> {
+    loop {
+        let result = if class == WorkClass::Background {
+            cycle(
+                storage,
+                engine,
+                backend_id,
+                epoch,
+                owner,
+                options.max_actions,
+                Some(class),
+            )
+            .await
+        } else {
+            let mut report = CycleReport {
+                lane: class.as_str(),
+                admitted: 0,
+                executed: 0,
+                failed: 0,
+                retry: 0,
+            };
+            let definitions = std::collections::BTreeMap::new();
+            execute_ready(
+                storage,
+                engine,
+                &definitions,
+                backend_id,
+                epoch,
+                owner,
+                options.max_actions,
+                Some(class),
+                &mut report,
+            )
+            .await
+            .map(|_| report)
+        };
+        match result {
+            Ok(report) => print(&report)?,
             Err(
                 error @ (HsmError::Busy(_)
                 | HsmError::Conflict(_)
                 | HsmError::Unknown(_)
                 | HsmError::Io(_)),
-            ) if !options.once => eprintln!("cycle deferred: {error}"),
+            ) => eprintln!("{} lane deferred: {error}", class.as_str()),
             Err(error) => return Err(error),
         }
         tokio::time::sleep(Duration::from_millis(options.poll_ms)).await;
     }
 }
+
 async fn definitions(
     storage: &Storage,
     epoch: u64,
@@ -384,10 +455,12 @@ async fn cycle(
     epoch: u64,
     owner: &str,
     max_actions: usize,
+    class: Option<WorkClass>,
 ) -> HsmResult<CycleReport> {
     let _ = storage.gc_batch().await;
     let definitions = definitions(storage, epoch).await?;
     let mut report = CycleReport {
+        lane: class.map_or("all", WorkClass::as_str),
         admitted: 0,
         executed: 0,
         failed: 0,
@@ -401,6 +474,7 @@ async fn cycle(
         epoch,
         owner,
         max_actions,
+        class,
         &mut report,
     )
     .await?;
@@ -414,6 +488,7 @@ async fn cycle(
             epoch,
             owner,
             max_actions,
+            class,
             &mut report,
         )
         .await?;
@@ -449,6 +524,7 @@ async fn cycle(
         epoch,
         owner,
         max_actions,
+        class,
         &mut report,
     )
     .await?;
@@ -464,6 +540,7 @@ async fn execute_ready(
     epoch: u64,
     owner: &str,
     max_actions: usize,
+    class: Option<WorkClass>,
     report: &mut CycleReport,
 ) -> HsmResult<()> {
     if report.executed >= max_actions {
@@ -471,10 +548,24 @@ async fn execute_ready(
     }
     let mut after = None;
     'jobs: loop {
-        let page = storage
-            .ready_intents(&context(epoch, None), after.as_deref(), 16)
-            .await?;
+        let page = match class {
+            Some(class) => {
+                storage
+                    .ready_intents_in(&context(epoch, None), class, after.as_deref(), 16)
+                    .await?
+            }
+            None => {
+                storage
+                    .ready_intents(&context(epoch, None), after.as_deref(), 16)
+                    .await?
+            }
+        };
         for intent in page.items {
+            if class.is_some_and(|class| !class.accepts(&intent.action)) {
+                return Err(HsmError::Integrity(
+                    "source returned work from another execution class".into(),
+                ));
+            }
             let belongs = match &intent.action {
                 hsm_core::ManagedAction::Recall(key) | hsm_core::ManagedAction::Archive(key) => {
                     key.backend == backend_id
@@ -491,6 +582,19 @@ async fn execute_ready(
                     && intent.claim.as_ref().is_some_and(|c| c.epoch < epoch);
             if !eligible {
                 continue;
+            }
+            #[cfg(feature = "native-integration")]
+            if class == Some(WorkClass::Background) {
+                // Test-only suspension of an actual background executor turn;
+                // Recall must still progress through its separate lane.
+                if let Some(root) = std::env::var_os("HSM_TEST_BACKGROUND_PAUSE") {
+                    let root = std::path::PathBuf::from(root);
+                    std::fs::write(root.join("paused"), intent.id.as_bytes())
+                        .map_err(HsmError::Io)?;
+                    while !root.join("resume").exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
             }
             match engine
                 .run_intent(&context(epoch, None), &intent.id, owner)

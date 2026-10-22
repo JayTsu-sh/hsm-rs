@@ -294,6 +294,48 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         let retired_dir = curvine_fs_api::Path::from_str("/compact-after-restart/retire")?;
         let keep_after = curvine_fs_api::Path::from_str("/compact-after-restart/keep")?;
         assert_eq!(fs.delete(&retired_dir, true).await?.inodes, 1);
+        // One identity covers each public batch, including a committed
+        // successful prefix whose outer result is an error. Move the file
+        // before replay so a retry cannot silently reexecute the old paths.
+        let batch_request = |code: curvine_fs_api::RpcCode, header: Vec<u8>| curvine_proto::NativeMutationRequest {
+            version: 1, incarnation: initial.data.entity.namespace.clone(),
+            session: format!("{:016x}{}", curvine_runtime::common::LocalTime::mills(), curvine_model::hsm::native::token()),
+            sequence: 1, acknowledged: 0, code: code as u32, header,
+        };
+        let create_item = |path: &str| curvine_proto::CreateFileRequest {
+            path: path.into(), opts: curvine_model::ProtoUtils::create_opts_to_pb(
+                curvine_model::CreateFileOpts::with_create(true), "batch-restart"),
+            flags: curvine_model::OpenFlags::new_create().set_overwrite(false).value(),
+        };
+        let create_batch = batch_request(curvine_fs_api::RpcCode::CreateFilesBatch,
+            curvine_model::ProtoUtils::encode(curvine_proto::CreateFilesBatchRequest {
+                requests: vec![create_item("/batch-before-restart"), create_item("/batch-before-restart"), create_item("/batch-never")],
+            })?.to_vec());
+        let created_batch: curvine_proto::NativeMutationResponse = fs.fs_client()
+            .rpc(curvine_fs_api::RpcCode::NativeMutation, create_batch.clone()).await?;
+        assert!(!created_batch.success && created_batch.status == curvine_proto::NativeMutationStatusProto::Committed as i32);
+        let batch_before = curvine_fs_api::Path::from_str("/batch-before-restart")?;
+        let batch_after = curvine_fs_api::Path::from_str("/batch-after-restart")?;
+        let batch_inode = fs.get_status(&batch_before).await?.id;
+        let add_item = |path: &str| curvine_proto::AddBlockRequest { path: path.into(), ..Default::default() };
+        let add_batch = batch_request(curvine_fs_api::RpcCode::AddBlocksBatch,
+            curvine_model::ProtoUtils::encode(curvine_proto::AddBlocksBatchRequest {
+                requests: vec![add_item("/batch-before-restart"), add_item("/batch-missing")],
+            })?.to_vec());
+        let added_batch: curvine_proto::NativeMutationResponse = fs.fs_client()
+            .rpc(curvine_fs_api::RpcCode::NativeMutation, add_batch.clone()).await?;
+        assert!(!added_batch.success && added_batch.status == curvine_proto::NativeMutationStatusProto::Committed as i32);
+        let complete_item = |path: &str| curvine_proto::CompleteFileRequest {
+            path: path.into(), len: 0, client_name: "batch-restart".into(), return_file_blocks: Some(false), ..Default::default()
+        };
+        let complete_batch = batch_request(curvine_fs_api::RpcCode::CompleteFilesBatch,
+            curvine_model::ProtoUtils::encode(curvine_proto::CompleteFilesBatchRequest {
+                requests: vec![complete_item("/batch-before-restart"), complete_item("/batch-missing"), complete_item("/batch-before-restart")],
+            })?.to_vec());
+        let completed_batch: curvine_proto::NativeMutationResponse = fs.fs_client()
+            .rpc(curvine_fs_api::RpcCode::NativeMutation, complete_batch.clone()).await?;
+        assert!(completed_batch.success);
+        assert!(fs.rename(&batch_before, &batch_after).await?);
         let old_leader=fs.get_filesystem_info().await?.active_master;
         processes.restart(&old_leader)?;
         eprintln!("phase: restarted on another leader");
@@ -315,6 +357,18 @@ fn managed_roundtrip_survives_process_restart() -> Result {
         assert_eq!(retried_attributes, attribute_response,
             "attribute original result changed after replay on another leader");
         assert_eq!(fs.get_status(&after_dir).await?.children_num, 1);
+        for (request, original) in [(create_batch, created_batch), (add_batch, added_batch), (complete_batch, completed_batch)] {
+            let retried: curvine_proto::NativeMutationResponse = fs.fs_client()
+                .rpc(curvine_fs_api::RpcCode::NativeMutation, request).await?;
+            assert_eq!(retried, original, "batch original result changed after replay on another leader");
+        }
+        assert!(!fs.exists(&batch_before).await?);
+        assert!(!fs.exists(&curvine_fs_api::Path::from_str("/batch-never")?).await?);
+        assert_eq!(fs.get_status(&batch_after).await?.id, batch_inode);
+        assert_eq!(fs.get_status(&batch_after).await?.len, 0);
+        let batch_entity = hsm_core::EntityKey { entity: batch_inode.to_string(), ..initial.data.entity.clone() };
+        assert_eq!(storage.inspect(&batch_entity).await?.residency, Residency::Online);
+
         assert!(matches!(storage.inspect(&retired_entity).await, Err(HsmError::NotFound(_))));
         let gc = NativeControl::new(fs.clone());
         let collect = || gc.exchange(br#"{"op":"gc_batch"}"#.to_vec());
@@ -1419,3 +1473,9 @@ fn million_namespace_policy_recall_and_checkpoint_recovery() -> Result {
     );
     Ok(())
 }
+
+#[path = "support/live_ha.rs"]
+mod live_ha;
+
+#[path = "support/worker_lanes.rs"]
+mod worker_lanes;

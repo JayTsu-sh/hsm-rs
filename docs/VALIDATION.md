@@ -110,6 +110,25 @@ CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace
 
 默认 feature 的 workspace 测试不启动真实 Curvine 场景；必须显式开启 `native-integration`。当前仍未完成所有稀有 RPC 迁移、完整业务优先级调度和组合故障矩阵，没有把资格证明合批描述为完整业务调度器。当前百万验收及最终原版对比继续暂缓。
 
+## 2026-10-22 批量写、加权调度与独立执行通道
+
+八个直接依赖和 29 个 Curvine Git 包固定 `222a32549739d91d9e685fad29647f9fe6532918`，其他依赖与原 lock 完全一致，没有路径覆盖。Curvine 当前 270 项 Master 测试及两个 TCP/Raft 优化用例通过。
+
+三个公开批量 API 使用一个稳定请求身份、一份原始结果和一次原子发布；创建/块分配遇错时保存成功前缀及原始错误，关闭保留逐项结果。目录 owned 命令共享资格等待 Raft，apply 复核准备后提交的读者。Master 的 Recall/前台/后台按 4:8:1 调度，各类接入名额独立；实际提交后的不确定结果仍需确认前缀。
+
+常驻 worker 为 Recall 与 Archive/Release 保留独立执行通道，各最多一个动作；后台仍进行扫描与 Seal。`--once` 保留原顺序语义，常驻 `max-actions` 为每通道每轮上限，报告新增 `lane`。Source 按既有 work:0:/work:1: 索引分别分页，客户端只持有有界页面，不维护外部任务/文件镜像。
+
+本轮新增或增强的场景：
+
+- 实际 Raft commit/local apply 后丢失指定 Native 会话回执，首次返回 Uncertain；改名后用原身份重试返回原始批量错误，不重建旧路径（Curvine 优化集群用例）。
+- 全进程冷恢复时，对 CreateFilesBatch、AddBlocksBatch、CompleteFilesBatch 保存完整请求/响应；成功前缀后来改名后，在新 Leader 上逐字节比较原始结果。
+- 三个 Master 分别运行于独立进程。暂停当前 Leader、两个存活节点选主、恢复旧进程，再暂停替代 Leader；恢复的旧节点必须参加下一次 quorum，随后完成 Release/Recall 并校验 2 MiB+29 字节及 inode/data identity。使用相同操作身份重试可重试错误。
+- 暂停真实 CLI worker 的后台执行轮次，普通读取仍自动 Recall 并校验 1 MiB+37 字节；此时后台文件仍 Online。恢复后台后，其 Archive 也完成。暂停 hook 仅随 native-integration 编译。
+
+在线测试曾发现旧 Leader 因读批尚未提交时的资格失败而退出；修复将无修改的预检失败与真正提交未知分开。保留原失败日志 `research/hsm-live-ha-seal-fixed.log`；修复后的旧版本固定来源回归 `research/hsm-owned-batches-live-ha-fixed-git.log` 已通过 31 项功能与全部文档测试。本节的新通道组合日志为 `research/hsm-worker-lanes-full-fixed-git.log`（均相对于 `/work/jay/hsm`）。最终固定来源组合回归：**32 项功能测试通过、0 失败、3 ignored**，全部文档测试执行成功；七个 managed 场景全部通过（含独立进程在线两次选主、后台暂停期间自动 Recall），单独 native 搬运场景也通过。三个 ignored 为百万规模测试与两个由父测试显式启动的子进程 fixture。
+
+暂停/恢复进程验证在线失联和旧任期处理，不代表磁盘故障或选择性网络分区。LocalArchive 仍单节点、私有 Recall 仍单副本、控制者接管仍需显式 epoch；本轮未升级 PVE，未执行新版百万验收或最终原版性能对照。普通 HSM 控制仍保留独占提交，少数兼容/后台路径的收敛继续按优化方案推进。
+
 ## 边界与历史记录
 
 当前支持单硬链接、非 UFS 常规文件。策略是 GPFS 对应概念的类型化子集，不解析 GPFS 语法或任意权重表达式。索引分页减少目录扫描；大小、owner 等条件已在当前路径解析前检查，但仍需 Record 回查，路径仍后过滤。已完成百万 Record 基准及内部批量预置的百万 namespace 验证，尚未验收百万普通客户端写入吞吐；当前 owned 路径使用共享准备与条件发布，旧式修改仍有独占边界；当前代码的完整百万验收尚未执行。

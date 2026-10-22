@@ -405,3 +405,5 @@ pub(crate) fn remote_error(code: &str, message: String) -> HsmError {
 
 #[cfg(feature = "native")]
 mod lifecycle;
+#[cfg(feature = "native")]
+pub use lifecycle::WorkClass;
