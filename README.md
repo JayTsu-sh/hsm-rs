@@ -37,3 +37,6 @@ cargo run -p hsm-local --bin hsm-local -- /tmp/hsm-local-example
 
 
 生命周期控制现已使用 Source 有界检查集共享提交：策略更新/扫描入队、任务 claim/finish 和 GC 不再独占等待 Raft；Recall 认领/完成按任务实际 action 使用独立接入类别。容量逻辑预算、候选版本/当前路径/副本数和动作原始结果均在提交前检查。固定源码及增强的在线 HA 结果见[最新验证](docs/VALIDATION.md#2026-10-22-生命周期共享提交与任务跨换主恢复)，Source 的采样/资源边界见[详细设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lifecycle-shared-commit.md)。
+
+
+Source 的失联 Worker 清理已按 1024 项分页，页间重新排队并逐页交接副本修复；原始 Leader 任期和每次失联 token 阻止旧任务删除重连位置。纯位置清理不等待无日志回执，UFS 缓存失效仍保留确认保护。设计、单文件成本与非持久 outbox 的限制见[Source 分页清理](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lost-worker-cleanup.md)，配套固定来源回归见[最新验证](docs/VALIDATION.md#2026-10-22-失联-worker-分页清理与固定来源回归)。

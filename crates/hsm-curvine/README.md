@@ -75,3 +75,6 @@ Curvine 文件级控制和 Seal 现在共享资格等待 Raft，提交时核对�
 Source 的生命周期控制采用独立封装 `hsm-lifecycle-conditional-v1` 与 checkpoint 栅栏 `hsm_native_v8`。提交检查覆盖策略/任务/活动标记、候选 Record 合并版本与当前路径/副本数、动作 outcome 的存在性，以及水位策略读到的逻辑待释放预算。过期时返回 Busy，不保存该次失败绑定；namespace 改变返回 Fenced。水位仍基于 Worker 遥测，不能把逻辑预算解释为物理容量强预留。
 
 Recall 任务的 claim/finish/get 由 Source 根据不可变 action 分类，独立接入名额贯穿 gate；真实状态检查仍通过 ReadIndex 和条件发布。增强的独立 Master 故障测试覆盖策略与 Running claim 换主恢复、旧观察 Superseded 后重新筛选、实际 Release 后 Done、再次换主及 Recall 后原 finish 结果保持。源码、命令和原始日志见[验证记录](../../docs/VALIDATION.md#2026-10-22-生命周期共享提交与任务跨换主恢复)。
+
+
+当前 Source 还将 heartbeat 的失联位置清理改为 1024 项一页：逐页确认必要的 UFS namespace 日志并释放资格，再交接副本修复。纯派生位置不等待 journal 回执，重连或原始任期变化会取消旧任务。该 token 是 Source 的本地任务资格，Adapter 不接收 token，也不增加外部文件镜像；公开 HSM 接口和持久格式未因本次内部优化改变。来源与验证范围见[验证记录](../../docs/VALIDATION.md#2026-10-22-失联-worker-分页清理与固定来源回归)。

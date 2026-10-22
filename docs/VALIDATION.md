@@ -169,3 +169,23 @@ Source 的策略更新、扫描入队、claim/finish 和显式 GC 使用共享�
 Curvine Root 另有 **283 项 Master 与两个 TCP/Raft 用例通过**，包括不同候选并行入队、容量预算重检、动作成功结果与旧失败报告的竞争、新读者阻止旧 claim 发布，以及后台接入满额时 Recall 的独立名额。测试暂停 hook 只在 hsm-scale-test 编译。原始日志为开发环境 `research/hsm-lifecycle-priority-final.log` 和 `research/hsm-lifecycle-fixed-git-final.log`（相对 `/work/jay/hsm`）；首次固定来源回归另有 `research/hsm-lifecycle-fixed-git.log`。
 
 未升级 PVE，未执行本版本百万规模持续负载或最终原版性能比较。少数原始 RPC、失联 Worker 清理/UFS 缓存失效等旧后台路径仍保留独占协调；完整优化与物理 HA 矩阵尚未全部完成。
+
+
+## 2026-10-22 失联 Worker 分页清理与固定来源回归
+
+八个直接依赖和锁文件中的 29 个 Curvine 包固定 `a1878b22f7fdbb5cb4cad532c520015912a511e8`。除这组来源版本外，manifest 与 Cargo.lock 内容保持原样，没有 path patch 或其他依赖更新。执行：
+
+```bash
+CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace \
+  --features hsm-curvine/native-integration -j 6
+```
+
+最终 **32 项功能测试通过、0 失败、3 ignored，四个 crate 的全部文档测试通过**。七个 managed 场景通过（88.58 秒），覆盖普通写入纳管、策略筛选与实际 Release/自动 Recall、旧访问观察失效、目录/截断与批量结果冷恢复、CLI 控制者接管、后台暂停期间独立 Recall，以及三 Master 独立进程的两次在线选主。后者继续校验 Source 保存的策略、Running claim、实际 Release 后的 Done 与原 finish 结果；真实 Recall 后原 finish 仍返回其原 Offline 结果。单独 native 搬运场景通过（22.79 秒）。三个 ignored 仍为百万用例及两个父测试显式启动的子进程 fixture。
+
+Source 的 heartbeat 清理现在每页最多 1024 个块位置，按字节游标读取并原子删除双向索引；页间释放 authority gate，逐页交接副本修复，不在生产路径预先聚合整个 Worker 的块清单。纯位置清理不等待没有日志的 journal 回执；UFS 缓存失效与可能已有部分修改的错误仍确认其日志前缀。每次失联 token 和原始 Leader 任期控制旧任务资格：Start/Running 或新位置上报取消旧任务，已经失联的 Worker 发送 End 则保留清理。token 是 Source 内部的本地身份，未引入外部文件镜像，也没有改变公开 HSM 接口或持久格式。
+
+Source 完整回归 **290 项 Master、2 项真实 TCP/Raft、64 项文件系统和 6 项 inode 测试通过，0 失败**。新增覆盖旧 token 与重连/再次失联、End 保留清理、页间任期变化、Running 心跳之前的新位置上报、跨页 UFS 缓存不可读判定，以及不依赖 Raft 回执的纯位置清理。真实 TCP/Raft 用例注入 2050 个派生位置，首个 1024 项页面之后暂停清理，仍通过 SDK 写入/关闭/读回普通文件，恢复后按 1024/1024/2 完成清理。原有 UFS 缓存失效、存活副本和 Follower journal 重放也通过。
+
+最终日志（相对于 `/work/jay/hsm`）：`research/hsm-worker-cleanup-end-final.log`、`research/hsm-worker-cleanup-end-fixed-git.log`。旧 `837aa6b1` pin 的 `research/hsm-worker-cleanup-fixed-git.log` 是被最终修正替代的中断编译，不计入验收。详细设计见[Source 分页清理](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lost-worker-cleanup.md)。
+
+该集群清理用例的 inventory 是注入的派生位置记录，前台数据读写使用真实 Worker；它不代表物理 Worker/磁盘故障。单个大 UFS 文件解码/失效仍随布局增长，完整块报告仍有全清单成本，旧缓存删除尚缺完整持久 outbox，清理调度尚未实现换主后的持久游标与自动接续。LocalArchive 单节点和私有 Recall 单副本限制保持。未升级 PVE，未执行新版百万验收或最终原版性能对比。
