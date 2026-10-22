@@ -40,3 +40,8 @@ cargo run -p hsm-local --bin hsm-local -- /tmp/hsm-local-example
 
 
 Source 的失联 Worker 清理已按 1024 项分页，页间重新排队并逐页交接副本修复；原始 Leader 任期和每次失联 token 阻止旧任务删除重连位置。纯位置清理不等待无日志回执，UFS 缓存失效仍保留确认保护。设计、单文件成本与非持久 outbox 的限制见[Source 分页清理](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lost-worker-cleanup.md)，配套固定来源回归见[最新验证](docs/VALIDATION.md#2026-10-22-失联-worker-分页清理与固定来源回归)。
+
+
+失联 Worker 的清理检查点和修复需求现保存在 Curvine 的复制元数据内：删除前同批保存 pending 页面与需求，换主后重新确认失联并自动接续；修复仅入内存队列不会删除需求。每轮按有界游标扫描，Raft 等待不占心跳检测器的恢复锁。新格式要求全部 Master 匹配版本，详见 [Source 持久接续设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/worker-cleanup-recovery.md)。没有增加外部元数据镜像。
+
+固定来源组合验收见 [Worker 清理持久接续验证](docs/VALIDATION.md#2026-10-22-worker-清理持久接续与修复需求跨换主)。

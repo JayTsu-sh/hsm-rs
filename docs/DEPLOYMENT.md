@@ -102,3 +102,10 @@ C2 常驻 worker 优先领取召回并检查恢复锚点。C3 data-mover 将归�
 ## HA 目标设计
 
 当前 PVE 同宿主机部署仍用于功能测试。生产 HA 需要独立故障域上的三个 Master、满足写入确认和修复要求的 Worker 副本、跨节点 hsm-rs 主备，以及归档数据/目录和 Recall 在线布局的耐故障方案。详细接管顺序、微批换主语义、旧执行器隔离及故障注入矩阵见 [HA 设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/ha-design.md)。这些是待实现目标，未部署或验收。
+
+
+## Worker 清理的持久接续
+
+清理 job、待删页面与未完成修复需求使用 Curvine 自身的 Raft / RocksDB；hsm-rs 与执行器无需维护 Worker 文件镜像。新任期等待完整 worker_lost_interval，重新确认本地失联后接续，并重新扫描新 Leader 的位置清单。Follower 应用工作记录时不会执行位置删除。修复入队后仍保留需求，只有当前布局与当前副本策略满足，或当前文件/块已消失时才条件确认。
+
+本次新增内部日志格式和 hsm_native_v9 checkpoint 栅栏，全部 Master 需匹配版本，不能滚动混用旧格式。UFS 旧缓存删除 outbox、单个大文件成本和物理 Worker 故障边界见 [Source 详细设计](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/worker-cleanup-recovery.md)。这里的源码变更尚未部署到 PVE。

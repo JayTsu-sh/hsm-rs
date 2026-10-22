@@ -189,3 +189,33 @@ Source 完整回归 **290 项 Master、2 项真实 TCP/Raft、64 项文件系统
 最终日志（相对于 `/work/jay/hsm`）：`research/hsm-worker-cleanup-end-final.log`、`research/hsm-worker-cleanup-end-fixed-git.log`。旧 `837aa6b1` pin 的 `research/hsm-worker-cleanup-fixed-git.log` 是被最终修正替代的中断编译，不计入验收。详细设计见[Source 分页清理](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/lost-worker-cleanup.md)。
 
 该集群清理用例的 inventory 是注入的派生位置记录，前台数据读写使用真实 Worker；它不代表物理 Worker/磁盘故障。单个大 UFS 文件解码/失效仍随布局增长，完整块报告仍有全清单成本，旧缓存删除尚缺完整持久 outbox，清理调度尚未实现换主后的持久游标与自动接续。LocalArchive 单节点和私有 Recall 单副本限制保持。未升级 PVE，未执行新版百万验收或最终原版性能对比。
+
+
+## 2026-10-22 Worker 清理持久接续与修复需求跨换主
+
+八个直接依赖及锁文件中的 29 个 Curvine 包固定 `dcea3446e80448093f08a986cc398cb260e202d3`。只替换原先的 Curvine SHA，其他 manifest / lock 字节保持；没有本地路径覆盖。Source 新增清理 job、pending 页面、cursor 与独立修复需求，保存于自身复制元数据，没有外部文件镜像。新内部 envelope 与 hsm_native_v9 checkpoint 栅栏要求全部 Master 匹配版本；历史日志解释保留。
+
+删除前同批提交最多 1024 项 pending 与修复需求；位置删除重新检查原始任期和本地失联 token。每个新任期重新等待 worker_lost_interval，保留 pending，并从新 Leader 的实际位置清单重新扫描。修复每轮最多 32 页、每页 64 项，不扩大单次检查/提交边界；入队不算完成，当前 inode / 需求 observation / 新任期 Live 联系共同约束确认。恢复扫描等待 Raft 时不持有心跳检测器的 recovery mutex，旧扫描不能恢复新任期已重置的游标或 token。
+
+增强的独立进程 HA 场景按以下顺序验证：
+
+1. 延续已有真实文件归档、策略与 Running claim；另写入 1 MiB+53 字节的普通文件，将当前副本目标设为 2。集群只有一个真实 Worker，需求因此尚未满足。
+2. 在三个独立 Master 上分别注入同一失联 Worker 的 2050 个派生位置，包含普通文件的真实块 ID。旧 Leader 执行真实清理，在首批 1024 项已经删除、游标确认尚未提交处暂停；两份 Follower 已保存 pending，但位置仍各为 2050 项。
+3. SIGSTOP 旧 Leader，两个存活 Master 选主。由生产心跳恢复扫描器自动接续，无手工触发恢复；检查 job 已移除、位置归零，真实文件的未满足修复需求继续保留，普通内容仍可读。
+4. 恢复旧 Master，再暂停替代 Leader并第二次选主；再次核对接续与需求保留。原策略、任务 token、Done/finish 原始结果、实际 Release/Recall 以及内容/inode 的已有断言同时执行。
+5. 将该文件当前副本目标改回 1，验证需求自动确认移除，再次完整读回内容。该步骤证明依据当前策略确认需求，没有验证实际创建第二份物理副本。
+
+Worker inventory 使用 fixture 注入，Master 停止/恢复及选举使用真实独立进程；它不是物理 Worker/磁盘丢失测试。fixture 在反序列化配置后执行 MasterConf::init，确保 serde-skipped 的 duration 缓存真正使用 8 秒失联窗口。此前一次失败来自写死块数量，另一次失败来自实际缓存仍为默认 10 分钟，均保留失败日志，没有放宽自动恢复的断言。
+
+Source 最终回归：**298 项 Master、2 项真实 TCP/Raft、64 项文件系统及 6 项 inode 测试通过，0 失败**；三个规模/手工基准维持 ignored。新增 2050 条需求的批次回放测试检查游标接续、入队保留、每页边界及任期变化停止。Source 日志为 `research/hsm-cleanup-recovery-root-final-v3.log`（相对 `/work/jay/hsm`）。
+
+UFS 旧缓存删除仍缺完整持久 outbox，大 UFS 文件及完整块报告仍有随清单增长的成本；原始 inode 条件确认可能超过 payload 上限，需求会保留等待后续优化。LocalArchive 单节点和私有 Recall 单副本限制保持。本轮未升级 PVE、未运行新版百万验收、未给出最终原版性能差值。详细设计见 [Source 持久接续](https://github.com/JayTsu-sh/curvine/blob/main/docs/hsm/worker-cleanup-recovery.md)。
+
+最终固定来源命令与结果：
+
+```bash
+CARGO_TARGET_DIR=/work/cargo-target CXXFLAGS=-g0 cargo test --locked --workspace \
+  --features hsm-curvine/native-integration -j 6
+```
+
+**32 项功能测试通过、0 失败、3 ignored，四个 crate 的文档测试流程成功**。七个 managed 场景 93.68 秒全部通过，包含增强的两次在线选主/自动接续及全部原始结果断言；单独 native 搬运用例 26.82 秒通过。三个 ignored 为百万规模用例及两个由父测试启动的子进程 fixture。格式与差异检查通过。最终日志 `research/hsm-cleanup-recovery-fixed-git-final.log`；早期失败日志 `research/hsm-cleanup-recovery-fixed-git.log`、`research/hsm-cleanup-recovery-live-layout-fixed.log` 不计为通过；配置修正后、批次优化前的单用例验证为 `research/hsm-cleanup-recovery-live-config-fixed.log`。
